@@ -5,6 +5,8 @@
 
 Foo
 
+Bar
+
 ## A Scalable, Geo-Replicated, Transactional Datastore
 
 **Table of Contents**
