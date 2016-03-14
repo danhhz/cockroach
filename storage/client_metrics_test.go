@@ -69,7 +69,7 @@ func verifyStats(t *testing.T, s *storage.Store) {
 	// Sanity check: LiveBytes is not zero (ensures we don't have
 	// zeroed out structures.)
 	if liveBytes := getGauge(t, s, "livebytes"); liveBytes == 0 {
-		t.Fatal("Expected livebytes to be non-nero, was zero")
+		t.Fatal("Expected livebytes to be non-zero, was zero")
 	}
 
 	// Ensure that real MVCC stats match computed stats.
@@ -81,6 +81,8 @@ func verifyStats(t *testing.T, s *storage.Store) {
 	checkGauge(t, s, "keycount", realStats.KeyCount)
 	checkGauge(t, s, "valcount", realStats.ValCount)
 	checkGauge(t, s, "intentcount", realStats.IntentCount)
+	checkGauge(t, s, "sysbytes", realStats.SysBytes)
+	checkGauge(t, s, "syscount", realStats.SysCount)
 	// "Ages" will be different depending on how much time has passed. Even with
 	// a manual clock, this can be an issue in tests. Therefore, we do not
 	// verify them in this test.
@@ -91,12 +93,52 @@ func verifyStats(t *testing.T, s *storage.Store) {
 	}
 }
 
+func verifyRocksDBStats(t *testing.T, s *storage.Store) {
+	if err := s.ComputeMetrics(); err != nil {
+		t.Fatal(err)
+	}
+
+	testcases := []struct {
+		gaugeName string
+		min       int64
+	}{
+		{"rocksdb.block.cache.hits", 10},
+		{"rocksdb.block.cache.misses", 0},
+		{"rocksdb.block.cache.usage", 0},
+		{"rocksdb.block.cache.pinned-usage", 0},
+		{"rocksdb.bloom.filter.prefix.checked", 20},
+		{"rocksdb.bloom.filter.prefix.useful", 20},
+		{"rocksdb.memtable.hits", 0},
+		{"rocksdb.memtable.misses", 0},
+		{"rocksdb.memtable.total-size", 5000},
+		{"rocksdb.flushes", 1},
+		{"rocksdb.compactions", 0},
+		{"rocksdb.table-readers-mem-estimate", 50},
+	}
+	for _, tc := range testcases {
+		if a := getGauge(t, s, tc.gaugeName); a < tc.min {
+			t.Errorf("gauge %s = %d < min %d", tc.gaugeName, a, tc.min)
+		}
+	}
+}
+
 func TestStoreMetrics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	mtc := startMultiTestContext(t, 3)
 	defer mtc.Stop()
 
 	store0 := mtc.stores[0]
+	store1 := mtc.stores[1]
+
+	// Flush RocksDB memtables, so that RocksDB begins using block-based tables.
+	// This is useful, because most of the stats we track don't apply to
+	// memtables.
+	if err := store0.Engine().Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store1.Engine().Flush(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Perform a split, which has special metrics handling.
 	splitArgs := adminSplitArgs(roachpb.KeyMin, roachpb.Key("m"))
@@ -114,16 +156,31 @@ func TestStoreMetrics(t *testing.T) {
 	replica := store0.LookupReplica(roachpb.RKey("z"), nil)
 	mtc.replicateRange(replica.RangeID, 1, 2)
 
+	// Verify stats on store1 after replication.
+	verifyStats(t, store1)
+
 	// Add some data to the "right" range.
-	incArgs := incrementArgs([]byte("z"), 5)
-	if _, err := client.SendWrappedWith(store0, nil, roachpb.Header{
-		RangeID: replica.RangeID,
-	}, &incArgs); err != nil {
-		t.Fatal(err)
+	dataKey := []byte("z")
+	if _, pErr := mtc.dbs[0].Inc(dataKey, 5); pErr != nil {
+		t.Fatal(pErr)
 	}
 	mtc.waitForValues(roachpb.Key("z"), []int64{5, 5, 5})
 
-	// Verify all stats on store0 after addition.
+	// Verify all stats on store 0 and 1 after addition.
+	verifyStats(t, store0)
+	verifyStats(t, store1)
+
+	// Create a transaction statement that fails, but will add an entry to the
+	// sequence cache. Regression test for #4969.
+	if pErr := mtc.dbs[0].Txn(func(txn *client.Txn) *roachpb.Error {
+		b := &client.Batch{}
+		b.CPut(dataKey, 7, 6)
+		return txn.Run(b)
+	}); pErr == nil {
+		t.Fatal("Expected transaction error, but none received")
+	}
+
+	// Verify stats after sequence cache addition.
 	verifyStats(t, store0)
 
 	// Unreplicate range from the first store.
@@ -135,7 +192,12 @@ func TestStoreMetrics(t *testing.T) {
 
 	// Verify range count is as expected.
 	checkCounter(t, store0, "ranges", 1)
+	checkCounter(t, store1, "ranges", 1)
 
-	// Verify all stats on store0 after range is removed.
+	// Verify all stats on store0 and store1 after range is removed.
 	verifyStats(t, store0)
+	verifyStats(t, store1)
+
+	verifyRocksDBStats(t, store0)
+	verifyRocksDBStats(t, store1)
 }

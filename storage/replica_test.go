@@ -114,7 +114,7 @@ func (tc *testContext) StartWithStoreContext(t testing.TB, ctx StoreContext) {
 	config.TestingSetupZoneConfigHook(tc.stopper)
 	if tc.gossip == nil {
 		rpcContext := rpc.NewContext(nil, nil, tc.stopper)
-		tc.gossip = gossip.New(rpcContext, gossip.TestBootstrap, tc.stopper)
+		tc.gossip = gossip.New(rpcContext, nil, tc.stopper)
 		tc.gossip.SetNodeID(1)
 	}
 	if tc.manualClock == nil {
@@ -211,8 +211,8 @@ func (tc *testContext) initConfigs(realRange bool, t testing.TB) error {
 	}
 
 	util.SucceedsSoon(t, func() error {
-		if tc.gossip.GetSystemConfig() == nil {
-			return util.Errorf("expected non-nil system config")
+		if _, ok := tc.gossip.GetSystemConfig(); !ok {
+			return util.Errorf("expected system config to be set")
 		}
 		return nil
 	})
@@ -453,7 +453,6 @@ func TestRangeLeaderLease(t *testing.T) {
 	tc := testContext{}
 	tc.Start(t)
 	defer tc.Stop()
-	tc.clock.SetMaxOffset(maxClockOffset)
 
 	// Modify range descriptor to include a second replica; leader lease can
 	// only be obtained by Replicas which are part of the range descriptor. This
@@ -475,27 +474,23 @@ func TestRangeLeaderLease(t *testing.T) {
 	setLeaderLease(t, tc.rng, &roachpb.Lease{
 		Start:      now.Add(10, 0),
 		Expiration: now.Add(20, 0),
-		Replica: roachpb.ReplicaDescriptor{
-			ReplicaID: 2,
-			NodeID:    2,
-			StoreID:   2,
-		},
+		Replica:    secondReplica,
 	})
 	if held, expired := hasLease(tc.rng, tc.clock.Now().Add(15, 0)); held || expired {
-		t.Errorf("expected another replica to have leader lease")
+		t.Errorf("expected second replica to have leader lease")
 	}
 
 	{
 		sp := tc.rng.store.Tracer().StartSpan("test")
 		defer sp.Finish()
-		pErr := tc.rng.redirectOnOrAcquireLeaderLease(sp)
+		pErr := tc.rng.redirectOnOrAcquireLeaderLease(sp, tc.rng.context())
 		if lErr, ok := pErr.GetDetail().(*roachpb.NotLeaderError); !ok || lErr == nil {
 			t.Fatalf("wanted NotLeaderError, got %s", pErr)
 		}
 	}
 	// Advance clock past expiration and verify that another has
 	// leader lease will not be true.
-	tc.manualClock.Increment(21) // 21ns pass
+	tc.manualClock.Increment(21) // 21ns have passed
 	if held, expired := hasLease(tc.rng, tc.clock.Now()); held || !expired {
 		t.Errorf("expected another replica to have expired lease")
 	}
@@ -507,7 +502,7 @@ func TestRangeLeaderLease(t *testing.T) {
 	}
 
 	rng.mu.Lock()
-	rng.mu.proposeRaftCommandFn = func(id cmdIDKey, cmd roachpb.RaftCommand) error {
+	rng.mu.proposeRaftCommandFn = func(cmdIDKey, *pendingCmd) error {
 		return &roachpb.LeaseRejectedError{
 			Message: "replica not found",
 		}
@@ -517,12 +512,13 @@ func TestRangeLeaderLease(t *testing.T) {
 	{
 		sp := tc.rng.store.Tracer().StartSpan("test")
 		defer sp.Finish()
-		if _, ok := rng.redirectOnOrAcquireLeaderLease(sp).GetDetail().(*roachpb.NotLeaderError); !ok {
+		if _, ok := rng.redirectOnOrAcquireLeaderLease(sp, tc.rng.context()).GetDetail().(*roachpb.NotLeaderError); !ok {
 			t.Fatalf("expected %T, got %s", &roachpb.NotLeaderError{}, err)
 		}
 	}
 }
 
+// TestRangeNotLeaderError verifies NotLeaderError when lease is rejected.
 func TestRangeNotLeaderError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	tc := testContext{}
@@ -612,7 +608,7 @@ func TestRangeGossipConfigsOnLease(t *testing.T) {
 
 	// If this actually failed, we would have gossiped from MVCCPutProto.
 	// Unlikely, but why not check.
-	if cfg := tc.gossip.GetSystemConfig(); cfg != nil {
+	if cfg, ok := tc.gossip.GetSystemConfig(); ok {
 		if nv := len(cfg.Values); nv == 1 && cfg.Values[nv-1].Key.Equal(key) {
 			t.Errorf("unexpected gossip of system config: %s", cfg)
 		}
@@ -650,9 +646,9 @@ func TestRangeGossipConfigsOnLease(t *testing.T) {
 	})
 
 	util.SucceedsSoon(t, func() error {
-		cfg := tc.gossip.GetSystemConfig()
-		if cfg == nil {
-			return util.Errorf("expected non-nil system config")
+		cfg, ok := tc.gossip.GetSystemConfig()
+		if !ok {
+			return util.Errorf("expected system config to be set")
 		}
 		numValues := len(cfg.Values)
 		if numValues != 1 {
@@ -804,9 +800,8 @@ func TestRangeGossipAllConfigs(t *testing.T) {
 	tc := testContext{}
 	tc.Start(t)
 	defer tc.Stop()
-	cfg := tc.gossip.GetSystemConfig()
-	if cfg == nil {
-		t.Fatal("nil config")
+	if _, ok := tc.gossip.GetSystemConfig(); !ok {
+		t.Fatal("config not set")
 	}
 }
 
@@ -867,9 +862,9 @@ func TestRangeNoGossipConfig(t *testing.T) {
 		txn.Writing = true
 
 		// System config is not gossiped.
-		cfg := tc.gossip.GetSystemConfig()
-		if cfg == nil {
-			t.Fatal("nil config")
+		cfg, ok := tc.gossip.GetSystemConfig()
+		if !ok {
+			t.Fatal("config not set")
 		}
 		if len(cfg.Values) != 0 {
 			t.Errorf("System config was gossiped at #%d", i)
@@ -2166,6 +2161,7 @@ func TestEndTransactionResolveOnlyLocalIntents(t *testing.T) {
 // sequence cache records are purged on the local range (and only there).
 func TestEndTransactionDirectGC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	t.Skip("TODO(tschottdorf): #5088")
 	tc := testContext{}
 	key := roachpb.Key("a")
 	splitKey := roachpb.RKey(key).Next()
@@ -2343,9 +2339,8 @@ func TestSequenceCachePoisonOnResolve(t *testing.T) {
 		get := func(actor *roachpb.Transaction, k roachpb.Key) *roachpb.Error {
 			actor.Sequence++
 			_, pErr := client.SendWrappedWith(tc.store, nil, roachpb.Header{
-				Txn:       actor,
-				Timestamp: actor.Timestamp,
-				RangeID:   1,
+				Txn:     actor,
+				RangeID: 1,
 			}, &roachpb.GetRequest{Span: roachpb.Span{Key: k}})
 			return pErr
 		}
@@ -3531,7 +3526,7 @@ func TestRequestLeaderEncounterGroupDeleteError(t *testing.T) {
 	defer tc.Stop()
 
 	// Mock proposeRaftCommand to return an roachpb.RaftGroupDeletedError.
-	proposeRaftCommandFn := func(cmdIDKey, roachpb.RaftCommand) error {
+	proposeRaftCommandFn := func(cmdIDKey, *pendingCmd) error {
 		return &roachpb.RaftGroupDeletedError{}
 	}
 	rng, err := NewReplica(testRangeDescriptor(), tc.store, 0)
@@ -3691,9 +3686,9 @@ func TestReplicaLoadSystemConfigSpanIntent(t *testing.T) {
 			return err
 		}
 
-		kvs, _, pErr := rng.loadSystemConfigSpan()
-		if pErr != nil {
-			return pErr.GoError()
+		kvs, _, err := rng.loadSystemConfigSpan()
+		if err != nil {
+			return err
 		}
 
 		if len(kvs) != 1 || !bytes.Equal(kvs[0].Key, keys.SystemConfigSpan.Key) {
@@ -4022,7 +4017,7 @@ func TestReplicaCancelRaft(t *testing.T) {
 			if cancelEarly {
 				cancel()
 				tc.rng.mu.Lock()
-				tc.rng.mu.proposeRaftCommandFn = func(id cmdIDKey, cmd roachpb.RaftCommand) error {
+				tc.rng.mu.proposeRaftCommandFn = func(cmdIDKey, *pendingCmd) error {
 					return nil
 				}
 				tc.rng.mu.Unlock()
@@ -4047,5 +4042,137 @@ func TestReplicaCancelRaft(t *testing.T) {
 				t.Fatalf("unexpected error: %s", pErr)
 			}
 		}()
+	}
+}
+
+// verify the checksum for the range and returrn it.
+func verifyChecksum(t *testing.T, rng *Replica) []byte {
+	id := uuid.MakeV4()
+	notify := make(chan []byte, 1)
+	rng.setChecksumNotify(id, notify)
+	args := roachpb.ComputeChecksumRequest{
+		ChecksumID: id,
+		Version:    replicaChecksumVersion,
+	}
+	_, err := rng.ComputeChecksum(nil, nil, roachpb.Header{}, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case checksum := <-notify:
+		if checksum == nil {
+			t.Fatal("couldn't compute checksum")
+		}
+		verifyArgs := roachpb.VerifyChecksumRequest{
+			ChecksumID: id,
+			Version:    replicaChecksumVersion,
+			Checksum:   checksum,
+		}
+		_, err := rng.VerifyChecksum(nil, nil, roachpb.Header{}, verifyArgs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return checksum
+	}
+}
+
+func TestComputeVerifyChecksum(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	tc := testContext{}
+	tc.Start(t)
+	defer tc.Stop()
+	rng := tc.rng
+
+	incArgs := incrementArgs([]byte("a"), 23)
+	if _, err := client.SendWrapped(tc.Sender(), rng.context(), &incArgs); err != nil {
+		t.Fatal(err)
+	}
+	initialChecksum := verifyChecksum(t, rng)
+
+	// Getting a value will not affect the snapshot checksum
+	gArgs := getArgs(roachpb.Key("a"))
+	if _, err := client.SendWrapped(tc.Sender(), rng.context(), &gArgs); err != nil {
+		t.Fatal(err)
+	}
+	checksum := verifyChecksum(t, rng)
+
+	if !bytes.Equal(initialChecksum, checksum) {
+		t.Fatalf("changed checksum: e = %v, c = %v", initialChecksum, checksum)
+	}
+
+	// Modifying the range will change the checksum.
+	incArgs = incrementArgs([]byte("a"), 5)
+	if _, err := client.SendWrapped(tc.Sender(), rng.context(), &incArgs); err != nil {
+		t.Fatal(err)
+	}
+	checksum = verifyChecksum(t, rng)
+	if bytes.Equal(initialChecksum, checksum) {
+		t.Fatalf("same checksum: e = %v, c = %v", initialChecksum, checksum)
+	}
+
+	// Verify that a bad version/checksum sent will result in an error.
+	id := uuid.MakeV4()
+	notify := make(chan []byte, 1)
+	rng.setChecksumNotify(id, notify)
+	args := roachpb.ComputeChecksumRequest{
+		ChecksumID: id,
+	}
+	_, err := rng.ComputeChecksum(nil, nil, roachpb.Header{}, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Set a callback for checksum mismatch panics.
+	var panicked bool
+	rng.store.ctx.TestingMocker.BadChecksumPanic = func() { panicked = true }
+	select {
+	case <-notify:
+		// First test that sending a Verification request with a bad version and
+		// bad checksum will return without panicking because of a bad checksum.
+		verifyArgs := roachpb.VerifyChecksumRequest{
+			ChecksumID: id,
+			Version:    10000001,
+			Checksum:   []byte("bad checksum"),
+		}
+		_, err = rng.VerifyChecksum(nil, nil, roachpb.Header{}, verifyArgs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if panicked {
+			t.Fatal("VerifyChecksum panicked")
+		}
+		// Setting the correct version results in a panic.
+		verifyArgs.Version = replicaChecksumVersion
+		_, err = rng.VerifyChecksum(nil, nil, roachpb.Header{}, verifyArgs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !panicked {
+			t.Fatal("VerifyChecksum didn't panic")
+		}
+		panicked = false
+	}
+
+	id = uuid.MakeV4()
+	// send a ComputeChecksum with a bad version doesn't result in a
+	// computed checksum.
+	args = roachpb.ComputeChecksumRequest{
+		ChecksumID: id,
+		Version:    23343434,
+	}
+	_, err = rng.ComputeChecksum(nil, nil, roachpb.Header{}, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sending a VerifyChecksum with a bad checksum is a noop.
+	verifyArgs := roachpb.VerifyChecksumRequest{
+		ChecksumID: id,
+		Checksum:   []byte("bad checksum"),
+	}
+	_, err = rng.VerifyChecksum(nil, nil, roachpb.Header{}, verifyArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if panicked {
+		t.Fatal("VerifyChecksum panicked")
 	}
 }

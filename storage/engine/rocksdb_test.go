@@ -30,13 +30,25 @@ import (
 	"github.com/termie/go-shutil"
 
 	"github.com/cockroachdb/cockroach/roachpb"
+	"github.com/cockroachdb/cockroach/testutils"
 	"github.com/cockroachdb/cockroach/util/encoding"
+	"github.com/cockroachdb/cockroach/util/leaktest"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/randutil"
 	"github.com/cockroachdb/cockroach/util/stop"
 )
 
 const testCacheSize = 1 << 30 // 1 GB
+
+func TestMinMemtableBudget(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	rocksdb := NewRocksDB(roachpb.Attributes{}, ".", 0, 0, 0, stop.NewStopper())
+	const expected = "memtable budget must be at least"
+	if err := rocksdb.Open(); !testutils.IsError(err, expected) {
+		t.Fatalf("expected %s, but got %v", expected, err)
+	}
+}
 
 // readAllFiles reads all of the files matching pattern thus ensuring they are
 // in the OS buffer cache.
@@ -677,4 +689,70 @@ func BenchmarkMVCCPutDelete(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestBatchIterReadOwnWrite(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	const cacheSize = 1 << 30 // 1 GB
+
+	stopper := stop.NewStopper()
+	db := NewInMem(roachpb.Attributes{}, cacheSize, stopper)
+	defer stopper.Stop()
+
+	b := db.NewBatch()
+
+	k := MakeMVCCMetadataKey(testKey1)
+
+	before := b.NewIterator(nil)
+	defer before.Close()
+
+	nonBatchBefore := db.NewIterator(nil)
+	defer nonBatchBefore.Close()
+
+	if err := b.Put(k, []byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+
+	after := b.NewIterator(nil)
+	defer after.Close()
+
+	if after.Seek(k); !after.Valid() {
+		t.Fatal("write missing on batch iter created after write")
+	}
+	if before.Seek(k); !before.Valid() {
+		t.Fatal("write missing on batch iter created before write")
+	}
+	if nonBatchBefore.Seek(k); nonBatchBefore.Valid() {
+		t.Fatal("uncommitted write seen by non-batch iter")
+	}
+
+	if err := b.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	nonBatchAfter := db.NewIterator(nil)
+	defer nonBatchAfter.Close()
+
+	if nonBatchBefore.Seek(k); nonBatchBefore.Valid() {
+		t.Fatal("committed write seen by non-batch iter created before commit")
+	}
+	if nonBatchAfter.Seek(k); !nonBatchAfter.Valid() {
+		t.Fatal("committed write missing by non-batch iter created after commit")
+	}
+
+	// `Commit` frees the batch, so iterators backed by it should panic.
+	func() {
+		defer func() {
+			if err, expected := recover(), "iterator used after backing engine closed"; err != expected {
+				t.Fatalf("Unexpected panic: expected %q, got %q", expected, err)
+			}
+		}()
+		after.Seek(k)
+		t.Fatalf(`Seek on batch-backed iter after batched closed should panic.
+			iter.engine: %T, iter.engine.Closed: %v, batch.Closed %v`,
+			after.(*rocksDBIterator).engine,
+			after.(*rocksDBIterator).engine.Closed(),
+			b.Closed(),
+		)
+	}()
 }

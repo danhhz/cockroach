@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/hlc"
@@ -29,15 +30,13 @@ import (
 )
 
 func newTestServer(t *testing.T, ctx *Context, manual bool) (*grpc.Server, net.Listener) {
-	s := grpc.NewServer()
-
 	tlsConfig, err := ctx.GetServerTLSConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
+	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
 
-	addr := util.CreateTestAddr("tcp")
-	ln, err := util.ListenAndServe(ctx.Stopper, s, addr, tlsConfig)
+	ln, err := util.ListenAndServeGRPC(ctx.Stopper, s, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}

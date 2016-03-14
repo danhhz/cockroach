@@ -20,6 +20,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/gossip/resolver"
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/rpc"
+	"github.com/cockroachdb/cockroach/testutils"
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/leaktest"
 	"github.com/cockroachdb/cockroach/util/stop"
@@ -38,17 +40,13 @@ import (
 func startGossip(nodeID roachpb.NodeID, stopper *stop.Stopper, t *testing.T) *Gossip {
 	rpcContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
-	addr := util.CreateTestAddr("tcp")
 	server := rpc.NewServer(rpcContext)
-	tlsConfig, err := rpcContext.GetServerTLSConfig()
+	ln, err := util.ListenAndServeGRPC(stopper, server, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := util.ListenAndServe(stopper, server, addr, tlsConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := New(rpcContext, TestBootstrap, stopper)
+	addr := ln.Addr()
+	g := New(rpcContext, nil, stopper)
 	g.SetNodeID(nodeID)
 	if err := g.SetNodeDescriptor(&roachpb.NodeDescriptor{
 		NodeID:  nodeID,
@@ -56,7 +54,7 @@ func startGossip(nodeID roachpb.NodeID, stopper *stop.Stopper, t *testing.T) *Go
 	}); err != nil {
 		t.Fatal(err)
 	}
-	g.start(server, ln.Addr())
+	g.start(server, addr)
 	time.Sleep(time.Millisecond)
 	return g
 }
@@ -102,28 +100,18 @@ func startFakeServerGossips(t *testing.T) (local *Gossip, remote *fakeGossipServ
 	stopper = stop.NewStopper()
 	lRPCContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
-	laddr := util.CreateTestAddr("tcp")
 	lserver := rpc.NewServer(lRPCContext)
-	lTLSConfig, err := lRPCContext.GetServerTLSConfig()
+	lln, err := util.ListenAndServeGRPC(stopper, lserver, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lln, err := util.ListenAndServe(stopper, lserver, laddr, lTLSConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	local = New(lRPCContext, TestBootstrap, stopper)
+	local = New(lRPCContext, nil, stopper)
 	local.start(lserver, lln.Addr())
 
 	rRPCContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
-	raddr := util.CreateTestAddr("tcp")
 	rserver := rpc.NewServer(rRPCContext)
-	rTLSConfig, err := rRPCContext.GetServerTLSConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rln, err := util.ListenAndServe(stopper, rserver, raddr, rTLSConfig)
+	rln, err := util.ListenAndServeGRPC(stopper, rserver, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +119,6 @@ func startFakeServerGossips(t *testing.T) (local *Gossip, remote *fakeGossipServ
 	remote = newFakeGossipServer(rserver, stopper)
 	addr := rln.Addr()
 	remote.nodeAddr = util.MakeUnresolvedAddr(addr.Network(), addr.String())
-	time.Sleep(time.Millisecond)
 	return
 }
 
@@ -181,13 +168,12 @@ func TestClientNodeID(t *testing.T) {
 	nodeID := roachpb.NodeID(1)
 	local.SetNodeID(nodeID)
 
-	disconnected := make(chan *client, 1)
-
 	// Use an insecure context. We're talking to tcp socket which are not in the certs.
 	rpcContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
-
-	// Start a gossip client.
 	c := newClient(&remote.nodeAddr)
+	disconnected := make(chan *client, 1)
+	disconnected <- c
+
 	defer func() {
 		stopper.Stop()
 		if c != <-disconnected {
@@ -195,10 +181,21 @@ func TestClientNodeID(t *testing.T) {
 		}
 	}()
 
-	c.start(local, disconnected, rpcContext, stopper)
-	// Wait for c.gossip to start.
-	if receivedNodeID := <-remote.nodeIDChan; receivedNodeID != nodeID {
-		t.Errorf("client should send NodeID with %v, got %v", nodeID, receivedNodeID)
+	// A gossip client may fail to start if the grpc connection times out which
+	// can happen under load (such as in CircleCI or using `make stress`). So we
+	// loop creating clients until success or the test times out.
+	for {
+		// Wait for c.gossip to start.
+		select {
+		case receivedNodeID := <-remote.nodeIDChan:
+			if receivedNodeID != nodeID {
+				t.Fatalf("client should send NodeID with %v, got %v", nodeID, receivedNodeID)
+			}
+			return
+		case <-disconnected:
+			// The client hasn't been started or failed to start, loop and try again.
+			c.start(local, disconnected, rpcContext, stopper)
+		}
 	}
 }
 
@@ -320,13 +317,8 @@ func TestClientRegisterWithInitNodeID(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		RPCContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
-		addr := util.CreateTestAddr("tcp")
 		server := rpc.NewServer(RPCContext)
-		TLSConfig, err := RPCContext.GetServerTLSConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
-		ln, err := util.ListenAndServe(stopper, server, addr, TLSConfig)
+		ln, err := util.ListenAndServeGRPC(stopper, server, util.TestAddr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,4 +399,36 @@ func TestClientRetryBootstrap(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// TestClientForwardUnresolved verifies that a client does not resolve a forward
+// address prematurely.
+func TestClientForwardUnresolved(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	stopper := stop.NewStopper()
+	defer stopper.Stop()
+	const nodeID = 1
+	local := startGossip(nodeID, stopper, t)
+	local.mu.Lock()
+	addr := local.is.NodeAddr
+	local.mu.Unlock()
+
+	client := newClient(&addr) // never started
+
+	newAddr := util.UnresolvedAddr{
+		NetworkField: "tcp",
+		AddressField: "localhost:2345",
+	}
+	reply := &Response{
+		NodeID:          nodeID,
+		Addr:            addr,
+		AlternateNodeID: nodeID + 1,
+		AlternateAddr:   &newAddr,
+	}
+	if err := client.handleResponse(local, reply); !testutils.IsError(err, "received forward") {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(client.forwardAddr, &newAddr) {
+		t.Fatalf("unexpected forward address %v, expected %v", client.forwardAddr, &newAddr)
+	}
 }

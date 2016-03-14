@@ -703,8 +703,13 @@ func TestStoreRangeSystemSplits(t *testing.T) {
 // can arrange for both possible outcomes of the race.
 //
 // Range 1 is the system keyspace, located on node 0.
-// The range containing leftKey is the left side of the split, located on nodes 1, 2, and 3.
-// The range containing rightKey is the right side of the split, located on nodes 3, 4, and 5.
+//
+// The range containing leftKey is the left side of the split, located
+// on nodes 1, 2, and 3.
+//
+// The range containing rightKey is the right side of the split,
+// located on nodes 3, 4, and 5.
+//
 // Nodes 1-5 are stopped; only node 0 is running.
 //
 // See https://github.com/cockroachdb/cockroach/issues/1644.
@@ -750,7 +755,7 @@ func setupSplitSnapshotRace(t *testing.T) (mtc *multiTestContext, leftKey roachp
 
 	// Split the data range.
 	splitArgs = adminSplitArgs(keys.SystemMax, roachpb.Key("m"))
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &splitArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &splitArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 
@@ -777,12 +782,12 @@ func setupSplitSnapshotRace(t *testing.T) (mtc *multiTestContext, leftKey roachp
 	// unreplicateRange call above. It has four members which means it
 	// can only tolerate one failure without losing quorum. That failure
 	// is store 3 which we stopped earlier. Stopping store 1 too soon
-	// (before it has committed the final config change *and* propagate
+	// (before it has committed the final config change *and* propagated
 	// that commit to the followers 4 and 5) would constitute a second
 	// failure and render the range unable to achieve quorum after
 	// restart (in the SnapshotWins branch).
 	incArgs = incrementArgs(rightKey, 3)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 
@@ -816,7 +821,7 @@ func TestSplitSnapshotRace_SplitWins(t *testing.T) {
 
 	// Perform a write on the left range and wait for it to propagate.
 	incArgs := incrementArgs(leftKey, 10)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 	mtc.waitForValues(leftKey, []int64{0, 11, 11, 11, 0, 0})
@@ -827,13 +832,13 @@ func TestSplitSnapshotRace_SplitWins(t *testing.T) {
 
 	// Write to the right range.
 	incArgs = incrementArgs(rightKey, 20)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 	mtc.waitForValues(rightKey, []int64{0, 0, 0, 25, 25, 25})
 }
 
-// TestSplitSnapshotRace_SplitWins exercises one outcome of the
+// TestSplitSnapshotRace_SnapshotWins exercises one outcome of the
 // split/snapshot race: The right side of the split replicates first,
 // so target node sees a raft snapshot before it has processed the split,
 // so it still has a conflicting range.
@@ -849,7 +854,7 @@ func TestSplitSnapshotRace_SnapshotWins(t *testing.T) {
 
 	// Perform a write on the right range.
 	incArgs := incrementArgs(rightKey, 20)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 
@@ -873,13 +878,13 @@ func TestSplitSnapshotRace_SnapshotWins(t *testing.T) {
 	// it helps wake up dormant ranges that would otherwise have to wait
 	// for retry timeouts.
 	incArgs = incrementArgs(leftKey, 10)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 	mtc.waitForValues(leftKey, []int64{0, 11, 11, 11, 0, 0})
 
 	incArgs = incrementArgs(rightKey, 200)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 	mtc.waitForValues(rightKey, []int64{0, 0, 0, 225, 225, 225})
@@ -990,17 +995,17 @@ func TestLeaderAfterSplit(t *testing.T) {
 	rightKey := roachpb.Key("z")
 
 	splitArgs := adminSplitArgs(roachpb.KeyMin, splitKey)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &splitArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &splitArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 
 	incArgs := incrementArgs(leftKey, 1)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 
 	incArgs = incrementArgs(rightKey, 2)
-	if _, pErr := client.SendWrapped(mtc.distSender, nil, &incArgs); pErr != nil {
+	if _, pErr := client.SendWrapped(mtc.distSenders[0], nil, &incArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 }

@@ -62,7 +62,7 @@ func TestSendAndReceive(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 	nodeRPCContext := rpc.NewContext(testutils.NewNodeTestBaseContext(), nil, stopper)
-	g := gossip.New(nodeRPCContext, gossip.TestBootstrap, stopper)
+	g := gossip.New(nodeRPCContext, nil, stopper)
 	g.SetNodeID(roachpb.NodeID(1))
 
 	// Create several servers, each of which has two stores (A raft
@@ -95,11 +95,8 @@ func TestSendAndReceive(t *testing.T) {
 		nodeID := nextNodeID
 		nextNodeID++
 		grpcServer := rpc.NewServer(nodeRPCContext)
-		tlsConfig, err := nodeRPCContext.GetServerTLSConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
-		ln, err := util.ListenAndServe(stopper, grpcServer, util.CreateTestAddr("tcp"), tlsConfig)
+		ln, err := util.ListenAndServeGRPC(stopper, grpcServer,
+			util.TestAddr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +112,8 @@ func TestSendAndReceive(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		transport := storage.NewRaftTransport(storage.GossipAddressResolver(g), grpcServer, nodeRPCContext)
+		transport := storage.NewRaftTransport(storage.GossipAddressResolver(g),
+			grpcServer, nodeRPCContext)
 		transports[nodeID] = transport
 
 		for store := 0; store < storesPerServer; store++ {
@@ -231,14 +229,10 @@ func TestInOrderDelivery(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 	nodeRPCContext := rpc.NewContext(testutils.NewNodeTestBaseContext(), nil, stopper)
-	g := gossip.New(nodeRPCContext, gossip.TestBootstrap, stopper)
+	g := gossip.New(nodeRPCContext, nil, stopper)
 
 	grpcServer := rpc.NewServer(nodeRPCContext)
-	tlsConfig, err := nodeRPCContext.GetServerTLSConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln, err := util.ListenAndServe(stopper, grpcServer, util.CreateTestAddr("tcp"), tlsConfig)
+	ln, err := util.ListenAndServeGRPC(stopper, grpcServer, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}

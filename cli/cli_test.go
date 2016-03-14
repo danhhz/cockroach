@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,11 +77,12 @@ func newCLITest() cliTest {
 	security.ResetReadFileFn()
 
 	assets := []string{
-		security.CACertPath(security.EmbeddedCertsDir),
-		security.ClientCertPath(security.EmbeddedCertsDir, security.RootUser),
-		security.ClientKeyPath(security.EmbeddedCertsDir, security.RootUser),
-		security.ClientCertPath(security.EmbeddedCertsDir, security.NodeUser),
-		security.ClientKeyPath(security.EmbeddedCertsDir, security.NodeUser),
+		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCACert),
+		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedCAKey),
+		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedNodeCert),
+		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedNodeKey),
+		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootCert),
+		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootKey),
 	}
 
 	for _, a := range assets {
@@ -149,6 +151,8 @@ func (c cliTest) RunWithCapture(line string) (out string, err error) {
 }
 
 func (c cliTest) RunWithArgs(a []string) {
+	cliContext.execStmts = nil
+
 	var args []string
 	args = append(args, a[0])
 	h, err := c.ServingHost()
@@ -163,9 +167,20 @@ func (c cliTest) RunWithArgs(a []string) {
 		fmt.Println(err)
 	}
 	args = append(args, fmt.Sprintf("--host=%s", h))
-	args = append(args, fmt.Sprintf("--port=%s", p))
-	// Always load test certs.
-	args = append(args, fmt.Sprintf("--certs=%s", c.certsDir))
+	if a[0] == "node" || a[0] == "quit" {
+		_, httpPort, err := net.SplitHostPort(c.HTTPAddr())
+		if err != nil {
+			fmt.Println(err)
+		}
+		args = append(args, fmt.Sprintf("--http-port=%s", httpPort))
+	} else {
+		args = append(args, fmt.Sprintf("--port=%s", p))
+	}
+	// Always run in secure mode and use test certs.
+	args = append(args, "--insecure=false")
+	args = append(args, fmt.Sprintf("--ca-cert=%s", filepath.Join(c.certsDir, security.EmbeddedCACert)))
+	args = append(args, fmt.Sprintf("--cert=%s", filepath.Join(c.certsDir, security.EmbeddedNodeCert)))
+	args = append(args, fmt.Sprintf("--key=%s", filepath.Join(c.certsDir, security.EmbeddedNodeKey)))
 	args = append(args, a[1:]...)
 
 	fmt.Fprintf(os.Stderr, "%s\n", args)
@@ -365,26 +380,38 @@ func Example_logging() {
 	c := newCLITest()
 	defer c.stop()
 
-	c.Run("debug kv --alsologtostderr=false scan")
-	c.Run("debug kv --log-backtrace-at=foo.go:1 scan")
-	c.Run("debug kv --log-dir='' scan")
-	c.Run("debug kv --logtostderr=true scan")
-	c.Run("debug kv --verbosity=0 scan")
-	c.Run("debug kv --vmodule=foo=1 scan")
+	c.RunWithArgs([]string{"sql", "--alsologtostderr=false", "-e", "select 1"})
+	c.RunWithArgs([]string{"sql", "--log-backtrace-at=foo.go:1", "-e", "select 1"})
+	c.RunWithArgs([]string{"sql", "--log-dir=", "-e", "select 1"})
+	c.RunWithArgs([]string{"sql", "--logtostderr=true", "-e", "select 1"})
+	c.RunWithArgs([]string{"sql", "--verbosity=0", "-e", "select 1"})
+	c.RunWithArgs([]string{"sql", "--vmodule=foo=1", "-e", "select 1"})
 
 	// Output:
-	// debug kv --alsologtostderr=false scan
-	// 0 result(s)
-	// debug kv --log-backtrace-at=foo.go:1 scan
-	// 0 result(s)
-	// debug kv --log-dir='' scan
-	// 0 result(s)
-	// debug kv --logtostderr=true scan
-	// 0 result(s)
-	// debug kv --verbosity=0 scan
-	// 0 result(s)
-	// debug kv --vmodule=foo=1 scan
-	// 0 result(s)
+	// sql --alsologtostderr=false -e select 1
+	// 1 row
+	// 1
+	// 1
+	// sql --log-backtrace-at=foo.go:1 -e select 1
+	// 1 row
+	// 1
+	// 1
+	// sql --log-dir= -e select 1
+	// 1 row
+	// 1
+	// 1
+	// sql --logtostderr=true -e select 1
+	// 1 row
+	// 1
+	// 1
+	// sql --verbosity=0 -e select 1
+	// 1 row
+	// 1
+	// 1
+	// sql --vmodule=foo=1 -e select 1
+	// 1 row
+	// 1
+	// 1
 }
 
 func Example_cput() {
@@ -522,24 +549,24 @@ func Example_sql() {
 	defer c.stop()
 
 	c.RunWithArgs([]string{"sql", "-e", "create database t; create table t.f (x int, y int); insert into t.f values (42, 69)"})
-	c.RunWithArgs([]string{"sql", "-e", "select 3", "select * from t.f"})
-	c.RunWithArgs([]string{"sql", "-e", "begin", "select 3", "commit"})
+	c.RunWithArgs([]string{"sql", "-e", "select 3", "-e", "select * from t.f"})
+	c.RunWithArgs([]string{"sql", "-e", "begin", "-e", "select 3", "-e", "commit"})
 	c.RunWithArgs([]string{"sql", "-e", "select * from t.f"})
-	c.RunWithArgs([]string{"sql", "-e", "show databases"})
+	c.RunWithArgs([]string{"sql", "--execute=show databases"})
 	c.RunWithArgs([]string{"sql", "-e", "explain select 3"})
 	c.RunWithArgs([]string{"sql", "-e", "select 1; select 2"})
 
 	// Output:
 	// sql -e create database t; create table t.f (x int, y int); insert into t.f values (42, 69)
 	// INSERT 1
-	// sql -e select 3 select * from t.f
+	// sql -e select 3 -e select * from t.f
 	// 1 row
 	// 3
 	// 3
 	// 1 row
 	// x	y
 	// 42	69
-	// sql -e begin select 3 commit
+	// sql -e begin -e select 3 -e commit
 	// BEGIN
 	// 1 row
 	// 3
@@ -549,7 +576,7 @@ func Example_sql() {
 	// 1 row
 	// x	y
 	// 42	69
-	// sql -e show databases
+	// sql --execute=show databases
 	// 2 rows
 	// Database
 	// system

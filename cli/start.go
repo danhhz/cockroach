@@ -88,9 +88,17 @@ flags are required. If the cluster already exists, and this node is
 uninitialized, specify the --join flag to point to any healthy node
 (or list of nodes) already part of the cluster.
 `,
-	Example:      `  cockroach start --certs=<dir> --store=attrs=ssd,path=/mnt/ssd1 [--join=host:port,[host:port]]`,
+	Example:      `  cockroach start --insecure --store=attrs=ssd,path=/mnt/ssd1 [--join=host:port,[host:port]]`,
 	SilenceUsage: true,
 	RunE:         runStart,
+}
+
+func initCacheSize() {
+	if !cacheSize.isSet {
+		if size, err := server.GetTotalMemory(); err == nil {
+			cliContext.CacheSize = size / 2
+		}
+	}
 }
 
 // runStart starts the cockroach node using --store as the list of
@@ -98,11 +106,7 @@ uninitialized, specify the --join flag to point to any healthy node
 // of other active nodes used to join this node to the cockroach
 // cluster, if this is its first time connecting.
 func runStart(_ *cobra.Command, _ []string) error {
-	if !cacheSize.isSet {
-		if size, err := server.GetTotalMemory(); err == nil {
-			cliContext.CacheSize = size / 2
-		}
-	}
+	initCacheSize()
 
 	// Default the log directory to the the "logs" subdirectory of the first
 	// non-memory store. We only do this for the "start" command which is why
@@ -262,7 +266,7 @@ completed, the server exits.
 
 // runQuit accesses the quit shutdown path.
 func runQuit(_ *cobra.Command, _ []string) error {
-	admin, err := client.NewAdminClient(&cliContext.Context.Context, cliContext.Addr, client.Quit)
+	admin, err := client.NewAdminClient(&cliContext.Context.Context, cliContext.HTTPAddr, client.Quit)
 	if err != nil {
 		return err
 	}

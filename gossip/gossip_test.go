@@ -40,7 +40,7 @@ func TestGossipInfoStore(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 	rpcContext := rpc.NewContext(nil, nil, stopper)
-	g := New(rpcContext, TestBootstrap, stopper)
+	g := New(rpcContext, nil, stopper)
 	// Have to call g.SetNodeID before call g.AddInfo
 	g.SetNodeID(roachpb.NodeID(1))
 	slice := []byte("b")
@@ -57,6 +57,7 @@ func TestGossipInfoStore(t *testing.T) {
 
 func TestGossipGetNextBootstrapAddress(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer resolver.SetLookupTimeout(time.Minute)()
 
 	// Set up an http server for testing the http load balancer.
 	i := 0

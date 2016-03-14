@@ -568,7 +568,7 @@ func getRangeMetadata(key roachpb.RKey, mtc *multiTestContext, t *testing.T) roa
 		MaxRanges: 1,
 	})
 	var reply *roachpb.RangeLookupResponse
-	if br, err := mtc.db.RunWithResponse(b); err != nil {
+	if br, err := mtc.dbs[0].RunWithResponse(b); err != nil {
 		t.Fatalf("error getting range metadata: %s", err)
 	} else {
 		reply = br.Responses[0].GetInner().(*roachpb.RangeLookupResponse)
@@ -1056,7 +1056,7 @@ func TestRaftAfterRemoveRange(t *testing.T) {
 		NodeID:    roachpb.NodeID(mtc.stores[2].StoreID()),
 		StoreID:   mtc.stores[2].StoreID(),
 	}
-	if err := mtc.transport.Send(&storage.RaftMessageRequest{
+	if err := mtc.transports[2].Send(&storage.RaftMessageRequest{
 		GroupID:     0,
 		ToReplica:   replica1,
 		FromReplica: replica2,
@@ -1105,7 +1105,10 @@ func TestStoreRangeRemoveDead(t *testing.T) {
 	mtc.Start(t, 3)
 	defer mtc.Stop()
 
-	sg := gossiputil.NewStoreGossiper(mtc.gossip)
+	var sgs []*gossiputil.StoreGossiper
+	for _, g := range mtc.gossips {
+		sgs = append(sgs, gossiputil.NewStoreGossiper(g))
+	}
 
 	// Replicate the range to all stores.
 	replica := mtc.stores[0].LookupReplica(roachpb.RKeyMin, nil)
@@ -1116,16 +1119,33 @@ func TestStoreRangeRemoveDead(t *testing.T) {
 	for _, s := range mtc.stores {
 		storeIDs = append(storeIDs, s.StoreID())
 	}
-	sg.GossipWithFunction(storeIDs, func() {
-		for _, s := range mtc.stores {
-			s.GossipStore()
-		}
-	})
 
-	aliveStoreIDs := []roachpb.StoreID{
-		mtc.stores[0].StoreID(),
-		mtc.stores[1].StoreID(),
+	// Gossip all stores and wait for callbacks to be run. This is
+	// tricky since we have multiple gossip objects communicating
+	// asynchronously. We use StoreGossiper to track callbacks but we
+	// need to set up all the callback tracking before any stores are
+	// gossiped.
+	var readyWG sync.WaitGroup
+	var doneWG sync.WaitGroup
+	readyWG.Add(len(sgs))
+	doneWG.Add(len(sgs))
+	for _, sg := range sgs {
+		go func(sg *gossiputil.StoreGossiper) {
+			ready := false
+			sg.GossipWithFunction(storeIDs, func() {
+				if !ready {
+					readyWG.Done()
+					ready = true
+				}
+			})
+			doneWG.Done()
+		}(sg)
 	}
+	readyWG.Wait()
+	for _, s := range mtc.stores {
+		s.GossipStore()
+	}
+	doneWG.Wait()
 
 	rangeDesc := getRangeMetadata(roachpb.RKeyMin, mtc, t)
 	if e, a := 3, len(rangeDesc.Replicas); e != a {
@@ -1150,10 +1170,9 @@ func TestStoreRangeRemoveDead(t *testing.T) {
 			mtc.manualClock.Increment(int64(tickerDur))
 
 			// Keep gossiping the alive stores.
-			sg.GossipWithFunction(aliveStoreIDs, func() {
-				mtc.stores[0].GossipStore()
-				mtc.stores[1].GossipStore()
-			})
+			mtc.stores[0].GossipStore()
+			mtc.stores[1].GossipStore()
+
 			// Force the repair queues on all alive stores to run.
 			mtc.stores[0].ForceReplicationScanAndProcess()
 			mtc.stores[1].ForceReplicationScanAndProcess()
@@ -1201,8 +1220,12 @@ func TestStoreRangeRebalance(t *testing.T) {
 		}
 		storeDescs = append(storeDescs, desc)
 	}
-	sg := gossiputil.NewStoreGossiper(mtc.gossip)
-	sg.GossipStores(storeDescs, t)
+	var sgs []*gossiputil.StoreGossiper
+	for _, g := range mtc.gossips {
+		sg := gossiputil.NewStoreGossiper(g)
+		sgs = append(sgs, sg)
+		sg.GossipStores(storeDescs, t)
+	}
 
 	// This can't use SucceedsSoon as using the exponential backoff mechanic
 	// won't work well with the forced replication scans.
@@ -1467,5 +1490,82 @@ func TestRemoveRangeWithoutGC(t *testing.T) {
 		t.Fatal(err)
 	} else if ok {
 		t.Fatal("expected range descriptor to be absent")
+	}
+}
+
+// TestCheckConsistencyMultiStore creates a Db with three stores ]
+// with three way replication. A value is added to the Db, and a
+// consistency check is run.
+func TestCheckConsistencyMultiStore(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	const numStores = 3
+	mtc := startMultiTestContext(t, numStores)
+	defer mtc.Stop()
+	// Setup replication of ramge 1 on store 0 to stores 1 and 2.
+	mtc.replicateRange(1, 1, 2)
+
+	// Write something to the DB.
+	putArgs := putArgs([]byte("a"), []byte("b"))
+	if _, err := client.SendWrapped(rg1(mtc.stores[0]), nil, &putArgs); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run consistency check.
+	checkArgs := roachpb.CheckConsistencyRequest{
+		Span: roachpb.Span{
+			// span of keys that include "a".
+			Key:    []byte("a"),
+			EndKey: []byte("aa"),
+		},
+	}
+	if _, err := client.SendWrapped(rg1(mtc.stores[0]), nil, &checkArgs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckInconsistent(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	const numStores = 3
+	mtc := startMultiTestContext(t, numStores)
+	defer mtc.Stop()
+	// Setup replication of ramge 1 on store 0 to stores 1 and 2.
+	mtc.replicateRange(1, 1, 2)
+
+	// Write something to the DB.
+	putArgs := putArgs([]byte("a"), []byte("b"))
+	if _, err := client.SendWrapped(rg1(mtc.stores[0]), nil, &putArgs); err != nil {
+		t.Fatal(err)
+	}
+	// Write some arbitrary data only to store 1. Inconsistent key "a"!
+	key := []byte("a")
+	var val roachpb.Value
+	val.SetInt(42)
+	if err := engine.MVCCPut(mtc.stores[1].Engine(), nil, key, mtc.stores[1].Clock().Timestamp(), val, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// The consistency check will panic on store 1. Let it panic only
+	// if the checksums match.
+	notify := make(chan struct{}, 1)
+	mtc.stores[1].TestingMocker().BadChecksumPanic = func() {
+		notify <- struct{}{}
+	}
+	// Run consistency check.
+	checkArgs := roachpb.CheckConsistencyRequest{
+		Span: roachpb.Span{
+			// span of keys that include "a".
+			Key:    []byte("a"),
+			EndKey: []byte("aa"),
+		},
+	}
+	if _, err := client.SendWrapped(rg1(mtc.stores[0]), nil, &checkArgs); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-notify:
+	case <-time.After(5 * time.Second):
+		t.Fatal("didn't receive notification from VerifyChecksum() that should have panicked")
 	}
 }

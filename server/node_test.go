@@ -59,12 +59,9 @@ func createTestNode(addr net.Addr, engines []engine.Engine, gossipBS net.Addr, t
 	ctx.Clock = hlc.NewClock(hlc.UnixNano)
 	nodeRPCContext := rpc.NewContext(nodeTestBaseContext, ctx.Clock, stopper)
 	ctx.ScanInterval = 10 * time.Hour
+	ctx.ConsistencyCheckInterval = 10 * time.Hour
 	grpcServer := rpc.NewServer(nodeRPCContext)
-	tlsConfig, err := nodeRPCContext.GetServerTLSConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln, err := util.ListenAndServe(stopper, grpcServer, addr, tlsConfig)
+	ln, err := util.ListenAndServeGRPC(stopper, grpcServer, addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +181,7 @@ func TestBootstrapNewStore(t *testing.T) {
 		engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper),
 		engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper),
 	}
-	_, _, node, stopper := createAndStartTestNode(util.CreateTestAddr("tcp"), engines, util.CreateTestAddr("tcp"), t)
+	_, _, node, stopper := createAndStartTestNode(util.TestAddr, engines, util.TestAddr, t)
 	defer stopper.Stop()
 
 	// Non-initialized stores (in this case the new in-memory-based
@@ -222,14 +219,12 @@ func TestNodeJoin(t *testing.T) {
 
 	// Start the bootstrap node.
 	engines1 := []engine.Engine{e}
-	addr1 := util.CreateTestAddr("tcp")
-	_, server1Addr, node1, stopper1 := createAndStartTestNode(addr1, engines1, addr1, t)
+	_, server1Addr, node1, stopper1 := createAndStartTestNode(util.TestAddr, engines1, util.TestAddr, t)
 	defer stopper1.Stop()
 
 	// Create a new node.
 	engines2 := []engine.Engine{engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)}
-	addr2 := util.CreateTestAddr("tcp")
-	_, server2Addr, node2, stopper2 := createAndStartTestNode(addr2, engines2, server1Addr, t)
+	_, server2Addr, node2, stopper2 := createAndStartTestNode(util.TestAddr, engines2, server1Addr, t)
 	defer stopper2.Stop()
 
 	// Verify new node is able to bootstrap its store.
@@ -270,8 +265,7 @@ func TestNodeJoinSelf(t *testing.T) {
 	engineStopper := stop.NewStopper()
 	defer engineStopper.Stop()
 	engines := []engine.Engine{engine.NewInMem(roachpb.Attributes{}, 1<<20, engineStopper)}
-	addr := util.CreateTestAddr("tcp")
-	_, addr, _, node, stopper := createTestNode(addr, engines, addr, t)
+	_, addr, _, node, stopper := createTestNode(util.TestAddr, engines, util.TestAddr, t)
 	defer stopper.Stop()
 	err := node.start(addr, engines, roachpb.Attributes{})
 	if err != errCannotJoinSelf {
@@ -301,7 +295,7 @@ func TestCorruptedClusterID(t *testing.T) {
 	}
 
 	engines := []engine.Engine{e}
-	_, serverAddr, _, node, stopper := createTestNode(util.CreateTestAddr("tcp"), engines, nil, t)
+	_, serverAddr, _, node, stopper := createTestNode(util.TestAddr, engines, nil, t)
 	stopper.Stop()
 	if err := node.start(serverAddr, engines, roachpb.Attributes{}); !testutils.IsError(err, "unidentified store") {
 		t.Errorf("unexpected error %v", err)

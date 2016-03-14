@@ -10,6 +10,7 @@
 		cockroach/roachpb/data.proto
 		cockroach/roachpb/errors.proto
 		cockroach/roachpb/internal.proto
+		cockroach/roachpb/internal_raft.proto
 		cockroach/roachpb/metadata.proto
 
 	It has these top-level messages:
@@ -30,6 +31,8 @@
 		ScanResponse
 		ReverseScanRequest
 		ReverseScanResponse
+		CheckConsistencyRequest
+		CheckConsistencyResponse
 		BeginTransactionRequest
 		BeginTransactionResponse
 		EndTransactionRequest
@@ -58,6 +61,10 @@
 		TruncateLogResponse
 		LeaderLeaseRequest
 		LeaderLeaseResponse
+		ComputeChecksumRequest
+		ComputeChecksumResponse
+		VerifyChecksumRequest
+		VerifyChecksumResponse
 		RequestUnion
 		ResponseUnion
 		Header
@@ -102,9 +109,9 @@
 		ErrorDetail
 		ErrPosition
 		Error
-		RaftCommand
 		InternalTimeSeriesData
 		InternalTimeSeriesSample
+		RaftCommand
 		RaftTruncatedState
 		RaftTombstone
 		RaftSnapshotData
@@ -125,6 +132,8 @@ import math "math"
 import cockroach_util_tracing "github.com/cockroachdb/cockroach/util/tracing"
 
 // skipping weak import gogoproto "github.com/cockroachdb/gogoproto"
+
+import github_com_cockroachdb_cockroach_util_uuid "github.com/cockroachdb/cockroach/util/uuid"
 
 import (
 	context "golang.org/x/net/context"
@@ -434,9 +443,33 @@ func (m *ReverseScanResponse) Reset()         { *m = ReverseScanResponse{} }
 func (m *ReverseScanResponse) String() string { return proto.CompactTextString(m) }
 func (*ReverseScanResponse) ProtoMessage()    {}
 
+// A CheckConsistencyRequest is the argument to the CheckConsistency() method.
+// It specifies the start and end keys for a span of ranges to which a consistency
+// check should be applied. A consistency check on a range involves running a
+// ComputeChecksum on the range followed by a VerifyChecksum.
+type CheckConsistencyRequest struct {
+	Span `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+}
+
+func (m *CheckConsistencyRequest) Reset()         { *m = CheckConsistencyRequest{} }
+func (m *CheckConsistencyRequest) String() string { return proto.CompactTextString(m) }
+func (*CheckConsistencyRequest) ProtoMessage()    {}
+
+// A CheckConsistencyResponse is the return value from the CheckConsistency() method.
+// If a replica finds itself to be inconsistent with its leader it will panic.
+type CheckConsistencyResponse struct {
+	ResponseHeader `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+}
+
+func (m *CheckConsistencyResponse) Reset()         { *m = CheckConsistencyResponse{} }
+func (m *CheckConsistencyResponse) String() string { return proto.CompactTextString(m) }
+func (*CheckConsistencyResponse) ProtoMessage()    {}
+
 // A BeginTransactionRequest is the argument to the BeginTransaction() method.
 type BeginTransactionRequest struct {
 	Span `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+	// How often to heartbeat in ns.
+	HeartbeatInterval *int64 `protobuf:"varint,2,opt,name=heartbeat_interval" json:"heartbeat_interval,omitempty"`
 }
 
 func (m *BeginTransactionRequest) Reset()         { *m = BeginTransactionRequest{} }
@@ -609,6 +642,7 @@ func (*RangeLookupResponse) ProtoMessage()    {}
 // gossip protocol.
 type HeartbeatTxnRequest struct {
 	Span `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+	Now  Timestamp `protobuf:"bytes,2,opt,name=now" json:"now"`
 }
 
 func (m *HeartbeatTxnRequest) Reset()         { *m = HeartbeatTxnRequest{} }
@@ -868,6 +902,58 @@ func (m *LeaderLeaseResponse) Reset()         { *m = LeaderLeaseResponse{} }
 func (m *LeaderLeaseResponse) String() string { return proto.CompactTextString(m) }
 func (*LeaderLeaseResponse) ProtoMessage()    {}
 
+// A ComputeChecksumRequest is arguments to the ComputeChecksum() method, to
+// start computing the checksum for the specified range at the snapshot for
+// this request command. A response is returned without the checksum.
+// The computed checksum is later compared to the one supplied
+// through a VerifyChecksumRequest.
+type ComputeChecksumRequest struct {
+	Span `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+	// The version used to pick the checksum method. It allows us to use a
+	// consistent checksumming method across replicas.
+	Version uint32 `protobuf:"varint,2,opt,name=version" json:"version"`
+	// A unique identifier to match a future VerifyChecksumRequest with this request.
+	ChecksumID github_com_cockroachdb_cockroach_util_uuid.UUID `protobuf:"bytes,3,opt,name=checksum_id,customtype=github.com/cockroachdb/cockroach/util/uuid.UUID" json:"checksum_id"`
+}
+
+func (m *ComputeChecksumRequest) Reset()         { *m = ComputeChecksumRequest{} }
+func (m *ComputeChecksumRequest) String() string { return proto.CompactTextString(m) }
+func (*ComputeChecksumRequest) ProtoMessage()    {}
+
+// A ComputeChecksumResponse is the response to a ComputeChecksum() operation.
+type ComputeChecksumResponse struct {
+	ResponseHeader `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+}
+
+func (m *ComputeChecksumResponse) Reset()         { *m = ComputeChecksumResponse{} }
+func (m *ComputeChecksumResponse) String() string { return proto.CompactTextString(m) }
+func (*ComputeChecksumResponse) ProtoMessage()    {}
+
+// A VerifyChecksumRequest is arguments to the VerifyChecksum() method, to
+// verify the checksum computed on the leader against the one requested
+// earlier through a ComputeChecksumRequest with the same checksum_id.
+type VerifyChecksumRequest struct {
+	Span `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+	// The version used to pick the checksum method. It allows us to use a
+	// consistent checksumming method across replicas.
+	Version    uint32                                          `protobuf:"varint,2,opt,name=version" json:"version"`
+	ChecksumID github_com_cockroachdb_cockroach_util_uuid.UUID `protobuf:"bytes,3,opt,name=checksum_id,customtype=github.com/cockroachdb/cockroach/util/uuid.UUID" json:"checksum_id"`
+	Checksum   []byte                                          `protobuf:"bytes,4,opt,name=checksum" json:"checksum,omitempty"`
+}
+
+func (m *VerifyChecksumRequest) Reset()         { *m = VerifyChecksumRequest{} }
+func (m *VerifyChecksumRequest) String() string { return proto.CompactTextString(m) }
+func (*VerifyChecksumRequest) ProtoMessage()    {}
+
+// A VerifyChecksumResponse is the response to a VerifyChecksum() operation.
+type VerifyChecksumResponse struct {
+	ResponseHeader `protobuf:"bytes,1,opt,name=header,embedded=header" json:"header"`
+}
+
+func (m *VerifyChecksumResponse) Reset()         { *m = VerifyChecksumResponse{} }
+func (m *VerifyChecksumResponse) String() string { return proto.CompactTextString(m) }
+func (*VerifyChecksumResponse) ProtoMessage()    {}
+
 // A RequestUnion contains exactly one of the optional requests.
 // The values added here must match those in ResponseUnion.
 type RequestUnion struct {
@@ -892,7 +978,10 @@ type RequestUnion struct {
 	TruncateLog        *TruncateLogRequest        `protobuf:"bytes,19,opt,name=truncate_log" json:"truncate_log,omitempty"`
 	LeaderLease        *LeaderLeaseRequest        `protobuf:"bytes,20,opt,name=leader_lease" json:"leader_lease,omitempty"`
 	ReverseScan        *ReverseScanRequest        `protobuf:"bytes,21,opt,name=reverse_scan" json:"reverse_scan,omitempty"`
-	Noop               *NoopRequest               `protobuf:"bytes,22,opt,name=noop" json:"noop,omitempty"`
+	ComputeChecksum    *ComputeChecksumRequest    `protobuf:"bytes,22,opt,name=compute_checksum" json:"compute_checksum,omitempty"`
+	VerifyChecksum     *VerifyChecksumRequest     `protobuf:"bytes,23,opt,name=verify_checksum" json:"verify_checksum,omitempty"`
+	CheckConsistency   *CheckConsistencyRequest   `protobuf:"bytes,24,opt,name=check_consistency" json:"check_consistency,omitempty"`
+	Noop               *NoopRequest               `protobuf:"bytes,25,opt,name=noop" json:"noop,omitempty"`
 }
 
 func (m *RequestUnion) Reset()         { *m = RequestUnion{} }
@@ -923,7 +1012,10 @@ type ResponseUnion struct {
 	TruncateLog        *TruncateLogResponse        `protobuf:"bytes,19,opt,name=truncate_log" json:"truncate_log,omitempty"`
 	LeaderLease        *LeaderLeaseResponse        `protobuf:"bytes,20,opt,name=leader_lease" json:"leader_lease,omitempty"`
 	ReverseScan        *ReverseScanResponse        `protobuf:"bytes,21,opt,name=reverse_scan" json:"reverse_scan,omitempty"`
-	Noop               *NoopResponse               `protobuf:"bytes,22,opt,name=noop" json:"noop,omitempty"`
+	ComputeChecksum    *ComputeChecksumResponse    `protobuf:"bytes,22,opt,name=compute_checksum" json:"compute_checksum,omitempty"`
+	VerifyChecksum     *VerifyChecksumResponse     `protobuf:"bytes,23,opt,name=verify_checksum" json:"verify_checksum,omitempty"`
+	CheckConsistency   *CheckConsistencyResponse   `protobuf:"bytes,24,opt,name=check_consistency" json:"check_consistency,omitempty"`
+	Noop               *NoopResponse               `protobuf:"bytes,25,opt,name=noop" json:"noop,omitempty"`
 }
 
 func (m *ResponseUnion) Reset()         { *m = ResponseUnion{} }
@@ -959,12 +1051,17 @@ type Header struct {
 	// fully-initialized transaction with txn ID, priority, initial
 	// timestamp, and maximum timestamp.
 	Txn *Transaction `protobuf:"bytes,5,opt,name=txn" json:"txn,omitempty"`
+	// How often to heartbeat in ns.
+	HeartbeatInterval *int64 `protobuf:"varint,9,opt,name=heartbeat_interval" json:"heartbeat_interval,omitempty"`
 	// read_consistency specifies the consistency for read
 	// operations. The default is CONSISTENT. This value is ignored for
 	// write operations.
 	ReadConsistency ReadConsistencyType `protobuf:"varint,6,opt,name=read_consistency,enum=cockroach.roachpb.ReadConsistencyType" json:"read_consistency"`
 	// trace, if set, is the active span of an OpenTracing distributed trace.
 	Trace *cockroach_util_tracing.Span `protobuf:"bytes,7,opt,name=trace" json:"trace,omitempty"`
+	// if set to a non-zero value, limits the total number of results for
+	// Scan/ReverseScan requests in the batch.
+	MaxScanResults int64 `protobuf:"varint,8,opt,name=max_scan_results" json:"max_scan_results"`
 }
 
 func (m *Header) Reset()         { *m = Header{} }
@@ -997,14 +1094,6 @@ func (*BatchResponse) ProtoMessage() {}
 type BatchResponse_Header struct {
 	// error is non-nil if an error occurred.
 	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	// timestamp specifies time at which read or write actually was
-	// performed. In the case of both reads and writes, if the timestamp
-	// supplied to the request was 0, the wall time of the node
-	// servicing the request will be set here. Additionally, in the case
-	// of writes, this value may be increased from the timestamp passed
-	// with the Span if the key being written was either read
-	// or written more recently.
-	Timestamp Timestamp `protobuf:"bytes,2,opt,name=timestamp" json:"timestamp"`
 	// txn is non-nil if the request specified a non-nil
 	// transaction. The transaction timestamp and/or priority may have
 	// been updated, depending on the outcome of the request.
@@ -1036,6 +1125,8 @@ func init() {
 	proto.RegisterType((*ScanResponse)(nil), "cockroach.roachpb.ScanResponse")
 	proto.RegisterType((*ReverseScanRequest)(nil), "cockroach.roachpb.ReverseScanRequest")
 	proto.RegisterType((*ReverseScanResponse)(nil), "cockroach.roachpb.ReverseScanResponse")
+	proto.RegisterType((*CheckConsistencyRequest)(nil), "cockroach.roachpb.CheckConsistencyRequest")
+	proto.RegisterType((*CheckConsistencyResponse)(nil), "cockroach.roachpb.CheckConsistencyResponse")
 	proto.RegisterType((*BeginTransactionRequest)(nil), "cockroach.roachpb.BeginTransactionRequest")
 	proto.RegisterType((*BeginTransactionResponse)(nil), "cockroach.roachpb.BeginTransactionResponse")
 	proto.RegisterType((*EndTransactionRequest)(nil), "cockroach.roachpb.EndTransactionRequest")
@@ -1065,6 +1156,10 @@ func init() {
 	proto.RegisterType((*TruncateLogResponse)(nil), "cockroach.roachpb.TruncateLogResponse")
 	proto.RegisterType((*LeaderLeaseRequest)(nil), "cockroach.roachpb.LeaderLeaseRequest")
 	proto.RegisterType((*LeaderLeaseResponse)(nil), "cockroach.roachpb.LeaderLeaseResponse")
+	proto.RegisterType((*ComputeChecksumRequest)(nil), "cockroach.roachpb.ComputeChecksumRequest")
+	proto.RegisterType((*ComputeChecksumResponse)(nil), "cockroach.roachpb.ComputeChecksumResponse")
+	proto.RegisterType((*VerifyChecksumRequest)(nil), "cockroach.roachpb.VerifyChecksumRequest")
+	proto.RegisterType((*VerifyChecksumResponse)(nil), "cockroach.roachpb.VerifyChecksumResponse")
 	proto.RegisterType((*RequestUnion)(nil), "cockroach.roachpb.RequestUnion")
 	proto.RegisterType((*ResponseUnion)(nil), "cockroach.roachpb.ResponseUnion")
 	proto.RegisterType((*Header)(nil), "cockroach.roachpb.Header")
@@ -1736,6 +1831,58 @@ func (m *ReverseScanResponse) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
+func (m *CheckConsistencyRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *CheckConsistencyRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
+	n23, err := m.Span.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n23
+	return i, nil
+}
+
+func (m *CheckConsistencyResponse) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *CheckConsistencyResponse) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
+	n24, err := m.ResponseHeader.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n24
+	return i, nil
+}
+
 func (m *BeginTransactionRequest) Marshal() (data []byte, err error) {
 	size := m.Size()
 	data = make([]byte, size)
@@ -1754,11 +1901,16 @@ func (m *BeginTransactionRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n23, err := m.Span.MarshalTo(data[i:])
+	n25, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n23
+	i += n25
+	if m.HeartbeatInterval != nil {
+		data[i] = 0x10
+		i++
+		i = encodeVarintApi(data, i, uint64(*m.HeartbeatInterval))
+	}
 	return i, nil
 }
 
@@ -1780,11 +1932,11 @@ func (m *BeginTransactionResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n24, err := m.ResponseHeader.MarshalTo(data[i:])
+	n26, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n24
+	i += n26
 	return i, nil
 }
 
@@ -1806,11 +1958,11 @@ func (m *EndTransactionRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n25, err := m.Span.MarshalTo(data[i:])
+	n27, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n25
+	i += n27
 	data[i] = 0x10
 	i++
 	if m.Commit {
@@ -1823,21 +1975,21 @@ func (m *EndTransactionRequest) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1a
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Deadline.Size()))
-		n26, err := m.Deadline.MarshalTo(data[i:])
+		n28, err := m.Deadline.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n26
+		i += n28
 	}
 	if m.InternalCommitTrigger != nil {
 		data[i] = 0x22
 		i++
 		i = encodeVarintApi(data, i, uint64(m.InternalCommitTrigger.Size()))
-		n27, err := m.InternalCommitTrigger.MarshalTo(data[i:])
+		n29, err := m.InternalCommitTrigger.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n27
+		i += n29
 	}
 	if len(m.IntentSpans) > 0 {
 		for _, msg := range m.IntentSpans {
@@ -1872,11 +2024,11 @@ func (m *EndTransactionResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n28, err := m.ResponseHeader.MarshalTo(data[i:])
+	n30, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n28
+	i += n30
 	data[i] = 0x10
 	i++
 	i = encodeVarintApi(data, i, uint64(m.CommitWait))
@@ -1909,11 +2061,11 @@ func (m *AdminSplitRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n29, err := m.Span.MarshalTo(data[i:])
+	n31, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n29
+	i += n31
 	if m.SplitKey != nil {
 		data[i] = 0x12
 		i++
@@ -1941,11 +2093,11 @@ func (m *AdminSplitResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n30, err := m.ResponseHeader.MarshalTo(data[i:])
+	n32, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n30
+	i += n32
 	return i, nil
 }
 
@@ -1967,11 +2119,11 @@ func (m *AdminMergeRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n31, err := m.Span.MarshalTo(data[i:])
+	n33, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n31
+	i += n33
 	return i, nil
 }
 
@@ -1993,11 +2145,11 @@ func (m *AdminMergeResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n32, err := m.ResponseHeader.MarshalTo(data[i:])
+	n34, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n32
+	i += n34
 	return i, nil
 }
 
@@ -2019,11 +2171,11 @@ func (m *RangeLookupRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n33, err := m.Span.MarshalTo(data[i:])
+	n35, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n33
+	i += n35
 	data[i] = 0x10
 	i++
 	i = encodeVarintApi(data, i, uint64(m.MaxRanges))
@@ -2064,11 +2216,11 @@ func (m *RangeLookupResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n34, err := m.ResponseHeader.MarshalTo(data[i:])
+	n36, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n34
+	i += n36
 	if len(m.Ranges) > 0 {
 		for _, msg := range m.Ranges {
 			data[i] = 0x12
@@ -2102,11 +2254,19 @@ func (m *HeartbeatTxnRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n35, err := m.Span.MarshalTo(data[i:])
+	n37, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n35
+	i += n37
+	data[i] = 0x12
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Now.Size()))
+	n38, err := m.Now.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n38
 	return i, nil
 }
 
@@ -2128,11 +2288,11 @@ func (m *HeartbeatTxnResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n36, err := m.ResponseHeader.MarshalTo(data[i:])
+	n39, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n36
+	i += n39
 	return i, nil
 }
 
@@ -2154,11 +2314,11 @@ func (m *GCRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n37, err := m.Span.MarshalTo(data[i:])
+	n40, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n37
+	i += n40
 	if len(m.Keys) > 0 {
 		for _, msg := range m.Keys {
 			data[i] = 0x1a
@@ -2198,11 +2358,11 @@ func (m *GCRequest_GCKey) MarshalTo(data []byte) (int, error) {
 	data[i] = 0x12
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Timestamp.Size()))
-	n38, err := m.Timestamp.MarshalTo(data[i:])
+	n41, err := m.Timestamp.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n38
+	i += n41
 	return i, nil
 }
 
@@ -2224,11 +2384,11 @@ func (m *GCResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n39, err := m.ResponseHeader.MarshalTo(data[i:])
+	n42, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n39
+	i += n42
 	return i, nil
 }
 
@@ -2250,43 +2410,43 @@ func (m *PushTxnRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n40, err := m.Span.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n40
-	data[i] = 0x12
-	i++
-	i = encodeVarintApi(data, i, uint64(m.PusherTxn.Size()))
-	n41, err := m.PusherTxn.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n41
-	data[i] = 0x1a
-	i++
-	i = encodeVarintApi(data, i, uint64(m.PusheeTxn.Size()))
-	n42, err := m.PusheeTxn.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n42
-	data[i] = 0x22
-	i++
-	i = encodeVarintApi(data, i, uint64(m.PushTo.Size()))
-	n43, err := m.PushTo.MarshalTo(data[i:])
+	n43, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n43
-	data[i] = 0x2a
+	data[i] = 0x12
 	i++
-	i = encodeVarintApi(data, i, uint64(m.Now.Size()))
-	n44, err := m.Now.MarshalTo(data[i:])
+	i = encodeVarintApi(data, i, uint64(m.PusherTxn.Size()))
+	n44, err := m.PusherTxn.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
 	i += n44
+	data[i] = 0x1a
+	i++
+	i = encodeVarintApi(data, i, uint64(m.PusheeTxn.Size()))
+	n45, err := m.PusheeTxn.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n45
+	data[i] = 0x22
+	i++
+	i = encodeVarintApi(data, i, uint64(m.PushTo.Size()))
+	n46, err := m.PushTo.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n46
+	data[i] = 0x2a
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Now.Size()))
+	n47, err := m.Now.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n47
 	data[i] = 0x30
 	i++
 	i = encodeVarintApi(data, i, uint64(m.PushType))
@@ -2311,19 +2471,19 @@ func (m *PushTxnResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n45, err := m.ResponseHeader.MarshalTo(data[i:])
+	n48, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n45
+	i += n48
 	data[i] = 0x12
 	i++
 	i = encodeVarintApi(data, i, uint64(m.PusheeTxn.Size()))
-	n46, err := m.PusheeTxn.MarshalTo(data[i:])
+	n49, err := m.PusheeTxn.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n46
+	i += n49
 	return i, nil
 }
 
@@ -2338,77 +2498,6 @@ func (m *ResolveIntentRequest) Marshal() (data []byte, err error) {
 }
 
 func (m *ResolveIntentRequest) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	data[i] = 0xa
-	i++
-	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n47, err := m.Span.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n47
-	data[i] = 0x12
-	i++
-	i = encodeVarintApi(data, i, uint64(m.IntentTxn.Size()))
-	n48, err := m.IntentTxn.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n48
-	data[i] = 0x18
-	i++
-	i = encodeVarintApi(data, i, uint64(m.Status))
-	data[i] = 0x20
-	i++
-	if m.Poison {
-		data[i] = 1
-	} else {
-		data[i] = 0
-	}
-	i++
-	return i, nil
-}
-
-func (m *ResolveIntentResponse) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
-}
-
-func (m *ResolveIntentResponse) MarshalTo(data []byte) (int, error) {
-	var i int
-	_ = i
-	var l int
-	_ = l
-	data[i] = 0xa
-	i++
-	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n49, err := m.ResponseHeader.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n49
-	return i, nil
-}
-
-func (m *ResolveIntentRangeRequest) Marshal() (data []byte, err error) {
-	size := m.Size()
-	data = make([]byte, size)
-	n, err := m.MarshalTo(data)
-	if err != nil {
-		return nil, err
-	}
-	return data[:n], nil
-}
-
-func (m *ResolveIntentRangeRequest) MarshalTo(data []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -2443,6 +2532,77 @@ func (m *ResolveIntentRangeRequest) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
+func (m *ResolveIntentResponse) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ResolveIntentResponse) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
+	n52, err := m.ResponseHeader.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n52
+	return i, nil
+}
+
+func (m *ResolveIntentRangeRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ResolveIntentRangeRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
+	n53, err := m.Span.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n53
+	data[i] = 0x12
+	i++
+	i = encodeVarintApi(data, i, uint64(m.IntentTxn.Size()))
+	n54, err := m.IntentTxn.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n54
+	data[i] = 0x18
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Status))
+	data[i] = 0x20
+	i++
+	if m.Poison {
+		data[i] = 1
+	} else {
+		data[i] = 0
+	}
+	i++
+	return i, nil
+}
+
 func (m *NoopResponse) Marshal() (data []byte, err error) {
 	size := m.Size()
 	data = make([]byte, size)
@@ -2461,11 +2621,11 @@ func (m *NoopResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n52, err := m.ResponseHeader.MarshalTo(data[i:])
+	n55, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n52
+	i += n55
 	return i, nil
 }
 
@@ -2487,11 +2647,11 @@ func (m *NoopRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n53, err := m.Span.MarshalTo(data[i:])
+	n56, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n53
+	i += n56
 	return i, nil
 }
 
@@ -2513,11 +2673,11 @@ func (m *ResolveIntentRangeResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n54, err := m.ResponseHeader.MarshalTo(data[i:])
+	n57, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n54
+	i += n57
 	return i, nil
 }
 
@@ -2539,19 +2699,19 @@ func (m *MergeRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n55, err := m.Span.MarshalTo(data[i:])
+	n58, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n55
+	i += n58
 	data[i] = 0x12
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Value.Size()))
-	n56, err := m.Value.MarshalTo(data[i:])
+	n59, err := m.Value.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n56
+	i += n59
 	return i, nil
 }
 
@@ -2573,11 +2733,11 @@ func (m *MergeResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n57, err := m.ResponseHeader.MarshalTo(data[i:])
+	n60, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n57
+	i += n60
 	return i, nil
 }
 
@@ -2599,11 +2759,11 @@ func (m *TruncateLogRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n58, err := m.Span.MarshalTo(data[i:])
+	n61, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n58
+	i += n61
 	data[i] = 0x10
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Index))
@@ -2631,11 +2791,11 @@ func (m *TruncateLogResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n59, err := m.ResponseHeader.MarshalTo(data[i:])
+	n62, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n59
+	i += n62
 	return i, nil
 }
 
@@ -2657,19 +2817,19 @@ func (m *LeaderLeaseRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
-	n60, err := m.Span.MarshalTo(data[i:])
+	n63, err := m.Span.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n60
+	i += n63
 	data[i] = 0x12
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Lease.Size()))
-	n61, err := m.Lease.MarshalTo(data[i:])
+	n64, err := m.Lease.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n61
+	i += n64
 	return i, nil
 }
 
@@ -2691,11 +2851,143 @@ func (m *LeaderLeaseResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
-	n62, err := m.ResponseHeader.MarshalTo(data[i:])
+	n65, err := m.ResponseHeader.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n62
+	i += n65
+	return i, nil
+}
+
+func (m *ComputeChecksumRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ComputeChecksumRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
+	n66, err := m.Span.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n66
+	data[i] = 0x10
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Version))
+	data[i] = 0x1a
+	i++
+	i = encodeVarintApi(data, i, uint64(m.ChecksumID.Size()))
+	n67, err := m.ChecksumID.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n67
+	return i, nil
+}
+
+func (m *ComputeChecksumResponse) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ComputeChecksumResponse) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
+	n68, err := m.ResponseHeader.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n68
+	return i, nil
+}
+
+func (m *VerifyChecksumRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *VerifyChecksumRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Span.Size()))
+	n69, err := m.Span.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n69
+	data[i] = 0x10
+	i++
+	i = encodeVarintApi(data, i, uint64(m.Version))
+	data[i] = 0x1a
+	i++
+	i = encodeVarintApi(data, i, uint64(m.ChecksumID.Size()))
+	n70, err := m.ChecksumID.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n70
+	if m.Checksum != nil {
+		data[i] = 0x22
+		i++
+		i = encodeVarintApi(data, i, uint64(len(m.Checksum)))
+		i += copy(data[i:], m.Checksum)
+	}
+	return i, nil
+}
+
+func (m *VerifyChecksumResponse) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *VerifyChecksumResponse) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	data[i] = 0xa
+	i++
+	i = encodeVarintApi(data, i, uint64(m.ResponseHeader.Size()))
+	n71, err := m.ResponseHeader.MarshalTo(data[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n71
 	return i, nil
 }
 
@@ -2718,151 +3010,151 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0xa
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Get.Size()))
-		n63, err := m.Get.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n63
-	}
-	if m.Put != nil {
-		data[i] = 0x12
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Put.Size()))
-		n64, err := m.Put.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n64
-	}
-	if m.ConditionalPut != nil {
-		data[i] = 0x1a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.ConditionalPut.Size()))
-		n65, err := m.ConditionalPut.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n65
-	}
-	if m.Increment != nil {
-		data[i] = 0x22
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Increment.Size()))
-		n66, err := m.Increment.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n66
-	}
-	if m.Delete != nil {
-		data[i] = 0x2a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Delete.Size()))
-		n67, err := m.Delete.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n67
-	}
-	if m.DeleteRange != nil {
-		data[i] = 0x32
-		i++
-		i = encodeVarintApi(data, i, uint64(m.DeleteRange.Size()))
-		n68, err := m.DeleteRange.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n68
-	}
-	if m.Scan != nil {
-		data[i] = 0x3a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Scan.Size()))
-		n69, err := m.Scan.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n69
-	}
-	if m.BeginTransaction != nil {
-		data[i] = 0x42
-		i++
-		i = encodeVarintApi(data, i, uint64(m.BeginTransaction.Size()))
-		n70, err := m.BeginTransaction.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n70
-	}
-	if m.EndTransaction != nil {
-		data[i] = 0x4a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.EndTransaction.Size()))
-		n71, err := m.EndTransaction.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n71
-	}
-	if m.AdminSplit != nil {
-		data[i] = 0x52
-		i++
-		i = encodeVarintApi(data, i, uint64(m.AdminSplit.Size()))
-		n72, err := m.AdminSplit.MarshalTo(data[i:])
+		n72, err := m.Get.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n72
 	}
-	if m.AdminMerge != nil {
-		data[i] = 0x5a
+	if m.Put != nil {
+		data[i] = 0x12
 		i++
-		i = encodeVarintApi(data, i, uint64(m.AdminMerge.Size()))
-		n73, err := m.AdminMerge.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.Put.Size()))
+		n73, err := m.Put.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n73
 	}
-	if m.HeartbeatTxn != nil {
-		data[i] = 0x62
+	if m.ConditionalPut != nil {
+		data[i] = 0x1a
 		i++
-		i = encodeVarintApi(data, i, uint64(m.HeartbeatTxn.Size()))
-		n74, err := m.HeartbeatTxn.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.ConditionalPut.Size()))
+		n74, err := m.ConditionalPut.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n74
 	}
-	if m.Gc != nil {
-		data[i] = 0x6a
+	if m.Increment != nil {
+		data[i] = 0x22
 		i++
-		i = encodeVarintApi(data, i, uint64(m.Gc.Size()))
-		n75, err := m.Gc.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.Increment.Size()))
+		n75, err := m.Increment.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n75
 	}
-	if m.PushTxn != nil {
-		data[i] = 0x72
+	if m.Delete != nil {
+		data[i] = 0x2a
 		i++
-		i = encodeVarintApi(data, i, uint64(m.PushTxn.Size()))
-		n76, err := m.PushTxn.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.Delete.Size()))
+		n76, err := m.Delete.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n76
 	}
-	if m.RangeLookup != nil {
-		data[i] = 0x7a
+	if m.DeleteRange != nil {
+		data[i] = 0x32
 		i++
-		i = encodeVarintApi(data, i, uint64(m.RangeLookup.Size()))
-		n77, err := m.RangeLookup.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.DeleteRange.Size()))
+		n77, err := m.DeleteRange.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n77
+	}
+	if m.Scan != nil {
+		data[i] = 0x3a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Scan.Size()))
+		n78, err := m.Scan.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n78
+	}
+	if m.BeginTransaction != nil {
+		data[i] = 0x42
+		i++
+		i = encodeVarintApi(data, i, uint64(m.BeginTransaction.Size()))
+		n79, err := m.BeginTransaction.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n79
+	}
+	if m.EndTransaction != nil {
+		data[i] = 0x4a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.EndTransaction.Size()))
+		n80, err := m.EndTransaction.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n80
+	}
+	if m.AdminSplit != nil {
+		data[i] = 0x52
+		i++
+		i = encodeVarintApi(data, i, uint64(m.AdminSplit.Size()))
+		n81, err := m.AdminSplit.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n81
+	}
+	if m.AdminMerge != nil {
+		data[i] = 0x5a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.AdminMerge.Size()))
+		n82, err := m.AdminMerge.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n82
+	}
+	if m.HeartbeatTxn != nil {
+		data[i] = 0x62
+		i++
+		i = encodeVarintApi(data, i, uint64(m.HeartbeatTxn.Size()))
+		n83, err := m.HeartbeatTxn.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n83
+	}
+	if m.Gc != nil {
+		data[i] = 0x6a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Gc.Size()))
+		n84, err := m.Gc.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n84
+	}
+	if m.PushTxn != nil {
+		data[i] = 0x72
+		i++
+		i = encodeVarintApi(data, i, uint64(m.PushTxn.Size()))
+		n85, err := m.PushTxn.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n85
+	}
+	if m.RangeLookup != nil {
+		data[i] = 0x7a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.RangeLookup.Size()))
+		n86, err := m.RangeLookup.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n86
 	}
 	if m.ResolveIntent != nil {
 		data[i] = 0x82
@@ -2870,11 +3162,11 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.ResolveIntent.Size()))
-		n78, err := m.ResolveIntent.MarshalTo(data[i:])
+		n87, err := m.ResolveIntent.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n78
+		i += n87
 	}
 	if m.ResolveIntentRange != nil {
 		data[i] = 0x8a
@@ -2882,11 +3174,11 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.ResolveIntentRange.Size()))
-		n79, err := m.ResolveIntentRange.MarshalTo(data[i:])
+		n88, err := m.ResolveIntentRange.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n79
+		i += n88
 	}
 	if m.Merge != nil {
 		data[i] = 0x92
@@ -2894,11 +3186,11 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Merge.Size()))
-		n80, err := m.Merge.MarshalTo(data[i:])
+		n89, err := m.Merge.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n80
+		i += n89
 	}
 	if m.TruncateLog != nil {
 		data[i] = 0x9a
@@ -2906,11 +3198,11 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.TruncateLog.Size()))
-		n81, err := m.TruncateLog.MarshalTo(data[i:])
+		n90, err := m.TruncateLog.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n81
+		i += n90
 	}
 	if m.LeaderLease != nil {
 		data[i] = 0xa2
@@ -2918,11 +3210,11 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.LeaderLease.Size()))
-		n82, err := m.LeaderLease.MarshalTo(data[i:])
+		n91, err := m.LeaderLease.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n82
+		i += n91
 	}
 	if m.ReverseScan != nil {
 		data[i] = 0xaa
@@ -2930,23 +3222,59 @@ func (m *RequestUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.ReverseScan.Size()))
-		n83, err := m.ReverseScan.MarshalTo(data[i:])
+		n92, err := m.ReverseScan.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n83
+		i += n92
 	}
-	if m.Noop != nil {
+	if m.ComputeChecksum != nil {
 		data[i] = 0xb2
 		i++
 		data[i] = 0x1
 		i++
-		i = encodeVarintApi(data, i, uint64(m.Noop.Size()))
-		n84, err := m.Noop.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.ComputeChecksum.Size()))
+		n93, err := m.ComputeChecksum.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n84
+		i += n93
+	}
+	if m.VerifyChecksum != nil {
+		data[i] = 0xba
+		i++
+		data[i] = 0x1
+		i++
+		i = encodeVarintApi(data, i, uint64(m.VerifyChecksum.Size()))
+		n94, err := m.VerifyChecksum.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n94
+	}
+	if m.CheckConsistency != nil {
+		data[i] = 0xc2
+		i++
+		data[i] = 0x1
+		i++
+		i = encodeVarintApi(data, i, uint64(m.CheckConsistency.Size()))
+		n95, err := m.CheckConsistency.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n95
+	}
+	if m.Noop != nil {
+		data[i] = 0xca
+		i++
+		data[i] = 0x1
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Noop.Size()))
+		n96, err := m.Noop.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n96
 	}
 	return i, nil
 }
@@ -2970,151 +3298,151 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0xa
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Get.Size()))
-		n85, err := m.Get.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n85
-	}
-	if m.Put != nil {
-		data[i] = 0x12
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Put.Size()))
-		n86, err := m.Put.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n86
-	}
-	if m.ConditionalPut != nil {
-		data[i] = 0x1a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.ConditionalPut.Size()))
-		n87, err := m.ConditionalPut.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n87
-	}
-	if m.Increment != nil {
-		data[i] = 0x22
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Increment.Size()))
-		n88, err := m.Increment.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n88
-	}
-	if m.Delete != nil {
-		data[i] = 0x2a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Delete.Size()))
-		n89, err := m.Delete.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n89
-	}
-	if m.DeleteRange != nil {
-		data[i] = 0x32
-		i++
-		i = encodeVarintApi(data, i, uint64(m.DeleteRange.Size()))
-		n90, err := m.DeleteRange.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n90
-	}
-	if m.Scan != nil {
-		data[i] = 0x3a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Scan.Size()))
-		n91, err := m.Scan.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n91
-	}
-	if m.BeginTransaction != nil {
-		data[i] = 0x42
-		i++
-		i = encodeVarintApi(data, i, uint64(m.BeginTransaction.Size()))
-		n92, err := m.BeginTransaction.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n92
-	}
-	if m.EndTransaction != nil {
-		data[i] = 0x4a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.EndTransaction.Size()))
-		n93, err := m.EndTransaction.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n93
-	}
-	if m.AdminSplit != nil {
-		data[i] = 0x52
-		i++
-		i = encodeVarintApi(data, i, uint64(m.AdminSplit.Size()))
-		n94, err := m.AdminSplit.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n94
-	}
-	if m.AdminMerge != nil {
-		data[i] = 0x5a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.AdminMerge.Size()))
-		n95, err := m.AdminMerge.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n95
-	}
-	if m.HeartbeatTxn != nil {
-		data[i] = 0x62
-		i++
-		i = encodeVarintApi(data, i, uint64(m.HeartbeatTxn.Size()))
-		n96, err := m.HeartbeatTxn.MarshalTo(data[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n96
-	}
-	if m.Gc != nil {
-		data[i] = 0x6a
-		i++
-		i = encodeVarintApi(data, i, uint64(m.Gc.Size()))
-		n97, err := m.Gc.MarshalTo(data[i:])
+		n97, err := m.Get.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n97
 	}
-	if m.PushTxn != nil {
-		data[i] = 0x72
+	if m.Put != nil {
+		data[i] = 0x12
 		i++
-		i = encodeVarintApi(data, i, uint64(m.PushTxn.Size()))
-		n98, err := m.PushTxn.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.Put.Size()))
+		n98, err := m.Put.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n98
 	}
-	if m.RangeLookup != nil {
-		data[i] = 0x7a
+	if m.ConditionalPut != nil {
+		data[i] = 0x1a
 		i++
-		i = encodeVarintApi(data, i, uint64(m.RangeLookup.Size()))
-		n99, err := m.RangeLookup.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.ConditionalPut.Size()))
+		n99, err := m.ConditionalPut.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
 		i += n99
+	}
+	if m.Increment != nil {
+		data[i] = 0x22
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Increment.Size()))
+		n100, err := m.Increment.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n100
+	}
+	if m.Delete != nil {
+		data[i] = 0x2a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Delete.Size()))
+		n101, err := m.Delete.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n101
+	}
+	if m.DeleteRange != nil {
+		data[i] = 0x32
+		i++
+		i = encodeVarintApi(data, i, uint64(m.DeleteRange.Size()))
+		n102, err := m.DeleteRange.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n102
+	}
+	if m.Scan != nil {
+		data[i] = 0x3a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Scan.Size()))
+		n103, err := m.Scan.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n103
+	}
+	if m.BeginTransaction != nil {
+		data[i] = 0x42
+		i++
+		i = encodeVarintApi(data, i, uint64(m.BeginTransaction.Size()))
+		n104, err := m.BeginTransaction.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n104
+	}
+	if m.EndTransaction != nil {
+		data[i] = 0x4a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.EndTransaction.Size()))
+		n105, err := m.EndTransaction.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n105
+	}
+	if m.AdminSplit != nil {
+		data[i] = 0x52
+		i++
+		i = encodeVarintApi(data, i, uint64(m.AdminSplit.Size()))
+		n106, err := m.AdminSplit.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n106
+	}
+	if m.AdminMerge != nil {
+		data[i] = 0x5a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.AdminMerge.Size()))
+		n107, err := m.AdminMerge.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n107
+	}
+	if m.HeartbeatTxn != nil {
+		data[i] = 0x62
+		i++
+		i = encodeVarintApi(data, i, uint64(m.HeartbeatTxn.Size()))
+		n108, err := m.HeartbeatTxn.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n108
+	}
+	if m.Gc != nil {
+		data[i] = 0x6a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Gc.Size()))
+		n109, err := m.Gc.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n109
+	}
+	if m.PushTxn != nil {
+		data[i] = 0x72
+		i++
+		i = encodeVarintApi(data, i, uint64(m.PushTxn.Size()))
+		n110, err := m.PushTxn.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n110
+	}
+	if m.RangeLookup != nil {
+		data[i] = 0x7a
+		i++
+		i = encodeVarintApi(data, i, uint64(m.RangeLookup.Size()))
+		n111, err := m.RangeLookup.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n111
 	}
 	if m.ResolveIntent != nil {
 		data[i] = 0x82
@@ -3122,11 +3450,11 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.ResolveIntent.Size()))
-		n100, err := m.ResolveIntent.MarshalTo(data[i:])
+		n112, err := m.ResolveIntent.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n100
+		i += n112
 	}
 	if m.ResolveIntentRange != nil {
 		data[i] = 0x8a
@@ -3134,11 +3462,11 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.ResolveIntentRange.Size()))
-		n101, err := m.ResolveIntentRange.MarshalTo(data[i:])
+		n113, err := m.ResolveIntentRange.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n101
+		i += n113
 	}
 	if m.Merge != nil {
 		data[i] = 0x92
@@ -3146,11 +3474,11 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Merge.Size()))
-		n102, err := m.Merge.MarshalTo(data[i:])
+		n114, err := m.Merge.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n102
+		i += n114
 	}
 	if m.TruncateLog != nil {
 		data[i] = 0x9a
@@ -3158,11 +3486,11 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.TruncateLog.Size()))
-		n103, err := m.TruncateLog.MarshalTo(data[i:])
+		n115, err := m.TruncateLog.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n103
+		i += n115
 	}
 	if m.LeaderLease != nil {
 		data[i] = 0xa2
@@ -3170,11 +3498,11 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.LeaderLease.Size()))
-		n104, err := m.LeaderLease.MarshalTo(data[i:])
+		n116, err := m.LeaderLease.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n104
+		i += n116
 	}
 	if m.ReverseScan != nil {
 		data[i] = 0xaa
@@ -3182,23 +3510,59 @@ func (m *ResponseUnion) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x1
 		i++
 		i = encodeVarintApi(data, i, uint64(m.ReverseScan.Size()))
-		n105, err := m.ReverseScan.MarshalTo(data[i:])
+		n117, err := m.ReverseScan.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n105
+		i += n117
 	}
-	if m.Noop != nil {
+	if m.ComputeChecksum != nil {
 		data[i] = 0xb2
 		i++
 		data[i] = 0x1
 		i++
-		i = encodeVarintApi(data, i, uint64(m.Noop.Size()))
-		n106, err := m.Noop.MarshalTo(data[i:])
+		i = encodeVarintApi(data, i, uint64(m.ComputeChecksum.Size()))
+		n118, err := m.ComputeChecksum.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n106
+		i += n118
+	}
+	if m.VerifyChecksum != nil {
+		data[i] = 0xba
+		i++
+		data[i] = 0x1
+		i++
+		i = encodeVarintApi(data, i, uint64(m.VerifyChecksum.Size()))
+		n119, err := m.VerifyChecksum.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n119
+	}
+	if m.CheckConsistency != nil {
+		data[i] = 0xc2
+		i++
+		data[i] = 0x1
+		i++
+		i = encodeVarintApi(data, i, uint64(m.CheckConsistency.Size()))
+		n120, err := m.CheckConsistency.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n120
+	}
+	if m.Noop != nil {
+		data[i] = 0xca
+		i++
+		data[i] = 0x1
+		i++
+		i = encodeVarintApi(data, i, uint64(m.Noop.Size()))
+		n121, err := m.Noop.MarshalTo(data[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n121
 	}
 	return i, nil
 }
@@ -3221,19 +3585,19 @@ func (m *Header) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Timestamp.Size()))
-	n107, err := m.Timestamp.MarshalTo(data[i:])
+	n122, err := m.Timestamp.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n107
+	i += n122
 	data[i] = 0x12
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Replica.Size()))
-	n108, err := m.Replica.MarshalTo(data[i:])
+	n123, err := m.Replica.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n108
+	i += n123
 	data[i] = 0x18
 	i++
 	i = encodeVarintApi(data, i, uint64(m.RangeID))
@@ -3244,11 +3608,11 @@ func (m *Header) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x2a
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Txn.Size()))
-		n109, err := m.Txn.MarshalTo(data[i:])
+		n124, err := m.Txn.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n109
+		i += n124
 	}
 	data[i] = 0x30
 	i++
@@ -3257,11 +3621,19 @@ func (m *Header) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x3a
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Trace.Size()))
-		n110, err := m.Trace.MarshalTo(data[i:])
+		n125, err := m.Trace.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n110
+		i += n125
+	}
+	data[i] = 0x40
+	i++
+	i = encodeVarintApi(data, i, uint64(m.MaxScanResults))
+	if m.HeartbeatInterval != nil {
+		data[i] = 0x48
+		i++
+		i = encodeVarintApi(data, i, uint64(*m.HeartbeatInterval))
 	}
 	return i, nil
 }
@@ -3284,11 +3656,11 @@ func (m *BatchRequest) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.Header.Size()))
-	n111, err := m.Header.MarshalTo(data[i:])
+	n126, err := m.Header.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n111
+	i += n126
 	if len(m.Requests) > 0 {
 		for _, msg := range m.Requests {
 			data[i] = 0x12
@@ -3322,11 +3694,11 @@ func (m *BatchResponse) MarshalTo(data []byte) (int, error) {
 	data[i] = 0xa
 	i++
 	i = encodeVarintApi(data, i, uint64(m.BatchResponse_Header.Size()))
-	n112, err := m.BatchResponse_Header.MarshalTo(data[i:])
+	n127, err := m.BatchResponse_Header.MarshalTo(data[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n112
+	i += n127
 	if len(m.Responses) > 0 {
 		for _, msg := range m.Responses {
 			data[i] = 0x12
@@ -3361,29 +3733,21 @@ func (m *BatchResponse_Header) MarshalTo(data []byte) (int, error) {
 		data[i] = 0xa
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Error.Size()))
-		n113, err := m.Error.MarshalTo(data[i:])
+		n128, err := m.Error.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n113
+		i += n128
 	}
-	data[i] = 0x12
-	i++
-	i = encodeVarintApi(data, i, uint64(m.Timestamp.Size()))
-	n114, err := m.Timestamp.MarshalTo(data[i:])
-	if err != nil {
-		return 0, err
-	}
-	i += n114
 	if m.Txn != nil {
 		data[i] = 0x1a
 		i++
 		i = encodeVarintApi(data, i, uint64(m.Txn.Size()))
-		n115, err := m.Txn.MarshalTo(data[i:])
+		n129, err := m.Txn.MarshalTo(data[i:])
 		if err != nil {
 			return 0, err
 		}
-		i += n115
+		i += n129
 	}
 	if len(m.CollectedSpans) > 0 {
 		for _, b := range m.CollectedSpans {
@@ -3599,11 +3963,30 @@ func (m *ReverseScanResponse) Size() (n int) {
 	return n
 }
 
+func (m *CheckConsistencyRequest) Size() (n int) {
+	var l int
+	_ = l
+	l = m.Span.Size()
+	n += 1 + l + sovApi(uint64(l))
+	return n
+}
+
+func (m *CheckConsistencyResponse) Size() (n int) {
+	var l int
+	_ = l
+	l = m.ResponseHeader.Size()
+	n += 1 + l + sovApi(uint64(l))
+	return n
+}
+
 func (m *BeginTransactionRequest) Size() (n int) {
 	var l int
 	_ = l
 	l = m.Span.Size()
 	n += 1 + l + sovApi(uint64(l))
+	if m.HeartbeatInterval != nil {
+		n += 1 + sovApi(uint64(*m.HeartbeatInterval))
+	}
 	return n
 }
 
@@ -3718,6 +4101,8 @@ func (m *HeartbeatTxnRequest) Size() (n int) {
 	var l int
 	_ = l
 	l = m.Span.Size()
+	n += 1 + l + sovApi(uint64(l))
+	l = m.Now.Size()
 	n += 1 + l + sovApi(uint64(l))
 	return n
 }
@@ -3901,6 +4286,48 @@ func (m *LeaderLeaseResponse) Size() (n int) {
 	return n
 }
 
+func (m *ComputeChecksumRequest) Size() (n int) {
+	var l int
+	_ = l
+	l = m.Span.Size()
+	n += 1 + l + sovApi(uint64(l))
+	n += 1 + sovApi(uint64(m.Version))
+	l = m.ChecksumID.Size()
+	n += 1 + l + sovApi(uint64(l))
+	return n
+}
+
+func (m *ComputeChecksumResponse) Size() (n int) {
+	var l int
+	_ = l
+	l = m.ResponseHeader.Size()
+	n += 1 + l + sovApi(uint64(l))
+	return n
+}
+
+func (m *VerifyChecksumRequest) Size() (n int) {
+	var l int
+	_ = l
+	l = m.Span.Size()
+	n += 1 + l + sovApi(uint64(l))
+	n += 1 + sovApi(uint64(m.Version))
+	l = m.ChecksumID.Size()
+	n += 1 + l + sovApi(uint64(l))
+	if m.Checksum != nil {
+		l = len(m.Checksum)
+		n += 1 + l + sovApi(uint64(l))
+	}
+	return n
+}
+
+func (m *VerifyChecksumResponse) Size() (n int) {
+	var l int
+	_ = l
+	l = m.ResponseHeader.Size()
+	n += 1 + l + sovApi(uint64(l))
+	return n
+}
+
 func (m *RequestUnion) Size() (n int) {
 	var l int
 	_ = l
@@ -3986,6 +4413,18 @@ func (m *RequestUnion) Size() (n int) {
 	}
 	if m.ReverseScan != nil {
 		l = m.ReverseScan.Size()
+		n += 2 + l + sovApi(uint64(l))
+	}
+	if m.ComputeChecksum != nil {
+		l = m.ComputeChecksum.Size()
+		n += 2 + l + sovApi(uint64(l))
+	}
+	if m.VerifyChecksum != nil {
+		l = m.VerifyChecksum.Size()
+		n += 2 + l + sovApi(uint64(l))
+	}
+	if m.CheckConsistency != nil {
+		l = m.CheckConsistency.Size()
 		n += 2 + l + sovApi(uint64(l))
 	}
 	if m.Noop != nil {
@@ -4082,6 +4521,18 @@ func (m *ResponseUnion) Size() (n int) {
 		l = m.ReverseScan.Size()
 		n += 2 + l + sovApi(uint64(l))
 	}
+	if m.ComputeChecksum != nil {
+		l = m.ComputeChecksum.Size()
+		n += 2 + l + sovApi(uint64(l))
+	}
+	if m.VerifyChecksum != nil {
+		l = m.VerifyChecksum.Size()
+		n += 2 + l + sovApi(uint64(l))
+	}
+	if m.CheckConsistency != nil {
+		l = m.CheckConsistency.Size()
+		n += 2 + l + sovApi(uint64(l))
+	}
 	if m.Noop != nil {
 		l = m.Noop.Size()
 		n += 2 + l + sovApi(uint64(l))
@@ -4106,6 +4557,10 @@ func (m *Header) Size() (n int) {
 	if m.Trace != nil {
 		l = m.Trace.Size()
 		n += 1 + l + sovApi(uint64(l))
+	}
+	n += 1 + sovApi(uint64(m.MaxScanResults))
+	if m.HeartbeatInterval != nil {
+		n += 1 + sovApi(uint64(*m.HeartbeatInterval))
 	}
 	return n
 }
@@ -4145,8 +4600,6 @@ func (m *BatchResponse_Header) Size() (n int) {
 		l = m.Error.Size()
 		n += 1 + l + sovApi(uint64(l))
 	}
-	l = m.Timestamp.Size()
-	n += 1 + l + sovApi(uint64(l))
 	if m.Txn != nil {
 		l = m.Txn.Size()
 		n += 1 + l + sovApi(uint64(l))
@@ -4237,6 +4690,15 @@ func (this *RequestUnion) GetValue() interface{} {
 	if this.ReverseScan != nil {
 		return this.ReverseScan
 	}
+	if this.ComputeChecksum != nil {
+		return this.ComputeChecksum
+	}
+	if this.VerifyChecksum != nil {
+		return this.VerifyChecksum
+	}
+	if this.CheckConsistency != nil {
+		return this.CheckConsistency
+	}
 	if this.Noop != nil {
 		return this.Noop
 	}
@@ -4287,6 +4749,12 @@ func (this *RequestUnion) SetValue(value interface{}) bool {
 		this.LeaderLease = vt
 	case *ReverseScanRequest:
 		this.ReverseScan = vt
+	case *ComputeChecksumRequest:
+		this.ComputeChecksum = vt
+	case *VerifyChecksumRequest:
+		this.VerifyChecksum = vt
+	case *CheckConsistencyRequest:
+		this.CheckConsistency = vt
 	case *NoopRequest:
 		this.Noop = vt
 	default:
@@ -4358,6 +4826,15 @@ func (this *ResponseUnion) GetValue() interface{} {
 	if this.ReverseScan != nil {
 		return this.ReverseScan
 	}
+	if this.ComputeChecksum != nil {
+		return this.ComputeChecksum
+	}
+	if this.VerifyChecksum != nil {
+		return this.VerifyChecksum
+	}
+	if this.CheckConsistency != nil {
+		return this.CheckConsistency
+	}
 	if this.Noop != nil {
 		return this.Noop
 	}
@@ -4408,6 +4885,12 @@ func (this *ResponseUnion) SetValue(value interface{}) bool {
 		this.LeaderLease = vt
 	case *ReverseScanResponse:
 		this.ReverseScan = vt
+	case *ComputeChecksumResponse:
+		this.ComputeChecksum = vt
+	case *VerifyChecksumResponse:
+		this.VerifyChecksum = vt
+	case *CheckConsistencyResponse:
+		this.CheckConsistency = vt
 	case *NoopResponse:
 		this.Noop = vt
 	default:
@@ -6140,6 +6623,166 @@ func (m *ReverseScanResponse) Unmarshal(data []byte) error {
 	}
 	return nil
 }
+func (m *CheckConsistencyRequest) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowApi
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: CheckConsistencyRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: CheckConsistencyRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Span", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Span.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipApi(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthApi
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *CheckConsistencyResponse) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowApi
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: CheckConsistencyResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: CheckConsistencyResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ResponseHeader", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ResponseHeader.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipApi(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthApi
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
 func (m *BeginTransactionRequest) Unmarshal(data []byte) error {
 	l := len(data)
 	iNdEx := 0
@@ -6199,6 +6842,26 @@ func (m *BeginTransactionRequest) Unmarshal(data []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HeartbeatInterval", wireType)
+			}
+			var v int64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				v |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.HeartbeatInterval = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := skipApi(data[iNdEx:])
@@ -7282,6 +7945,36 @@ func (m *HeartbeatTxnRequest) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			if err := m.Span.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Now", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Now.Unmarshal(data[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -9213,6 +9906,455 @@ func (m *LeaderLeaseResponse) Unmarshal(data []byte) error {
 	}
 	return nil
 }
+func (m *ComputeChecksumRequest) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowApi
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ComputeChecksumRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ComputeChecksumRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Span", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Span.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Version", wireType)
+			}
+			m.Version = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.Version |= (uint32(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ChecksumID", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				byteLen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ChecksumID.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipApi(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthApi
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ComputeChecksumResponse) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowApi
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ComputeChecksumResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ComputeChecksumResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ResponseHeader", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ResponseHeader.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipApi(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthApi
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *VerifyChecksumRequest) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowApi
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: VerifyChecksumRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: VerifyChecksumRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Span", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Span.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Version", wireType)
+			}
+			m.Version = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.Version |= (uint32(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ChecksumID", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				byteLen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ChecksumID.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Checksum", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				byteLen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Checksum = append(m.Checksum[:0], data[iNdEx:postIndex]...)
+			if m.Checksum == nil {
+				m.Checksum = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipApi(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthApi
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *VerifyChecksumResponse) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowApi
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: VerifyChecksumResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: VerifyChecksumResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ResponseHeader", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ResponseHeader.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipApi(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthApi
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
 func (m *RequestUnion) Unmarshal(data []byte) error {
 	l := len(data)
 	iNdEx := 0
@@ -9936,6 +11078,105 @@ func (m *RequestUnion) Unmarshal(data []byte) error {
 			}
 			iNdEx = postIndex
 		case 22:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ComputeChecksum", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.ComputeChecksum == nil {
+				m.ComputeChecksum = &ComputeChecksumRequest{}
+			}
+			if err := m.ComputeChecksum.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 23:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field VerifyChecksum", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.VerifyChecksum == nil {
+				m.VerifyChecksum = &VerifyChecksumRequest{}
+			}
+			if err := m.VerifyChecksum.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 24:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CheckConsistency", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.CheckConsistency == nil {
+				m.CheckConsistency = &CheckConsistencyRequest{}
+			}
+			if err := m.CheckConsistency.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 25:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Noop", wireType)
 			}
@@ -10713,6 +11954,105 @@ func (m *ResponseUnion) Unmarshal(data []byte) error {
 			iNdEx = postIndex
 		case 22:
 			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ComputeChecksum", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.ComputeChecksum == nil {
+				m.ComputeChecksum = &ComputeChecksumResponse{}
+			}
+			if err := m.ComputeChecksum.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 23:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field VerifyChecksum", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.VerifyChecksum == nil {
+				m.VerifyChecksum = &VerifyChecksumResponse{}
+			}
+			if err := m.VerifyChecksum.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 24:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CheckConsistency", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthApi
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.CheckConsistency == nil {
+				m.CheckConsistency = &CheckConsistencyResponse{}
+			}
+			if err := m.CheckConsistency.Unmarshal(data[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 25:
+			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Noop", wireType)
 			}
 			var msglen int
@@ -10976,6 +12316,45 @@ func (m *Header) Unmarshal(data []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 8:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MaxScanResults", wireType)
+			}
+			m.MaxScanResults = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.MaxScanResults |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 9:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HeartbeatInterval", wireType)
+			}
+			var v int64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowApi
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				v |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.HeartbeatInterval = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := skipApi(data[iNdEx:])
@@ -11278,36 +12657,6 @@ func (m *BatchResponse_Header) Unmarshal(data []byte) error {
 				m.Error = &Error{}
 			}
 			if err := m.Error.Unmarshal(data[iNdEx:postIndex]); err != nil {
-				return err
-			}
-			iNdEx = postIndex
-		case 2:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Timestamp", wireType)
-			}
-			var msglen int
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowApi
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			if msglen < 0 {
-				return ErrInvalidLengthApi
-			}
-			postIndex := iNdEx + msglen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			if err := m.Timestamp.Unmarshal(data[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex

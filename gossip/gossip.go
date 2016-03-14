@@ -104,11 +104,6 @@ const (
 	defaultCullInterval = 60 * time.Second
 )
 
-var (
-	// TestBootstrap is the default gossip bootstrap used for running tests.
-	TestBootstrap = []resolver.Resolver{}
-)
-
 // Storage is an interface which allows the gossip instance
 // to read and write bootstrapping data to persistent storage
 // between instantiations.
@@ -148,7 +143,8 @@ type Gossip struct {
 	// here and its own set of callbacks.
 	// We do not use the infostore to avoid unmarshalling under the
 	// main gossip lock.
-	systemConfig         *config.SystemConfig
+	systemConfig         config.SystemConfig
+	systemConfigSet      bool
 	systemConfigMu       sync.RWMutex
 	systemConfigChannels []chan<- struct{}
 
@@ -587,12 +583,12 @@ func (g *Gossip) RegisterCallback(pattern string, method Callback) func() {
 	}
 }
 
-// GetSystemConfig returns the local unmarshalled version of the
-// system config. It may be nil if it was never gossiped.
-func (g *Gossip) GetSystemConfig() *config.SystemConfig {
+// GetSystemConfig returns the local unmarshalled version of the system config.
+// The second return value indicates whether the system config has been set yet.
+func (g *Gossip) GetSystemConfig() (config.SystemConfig, bool) {
 	g.systemConfigMu.RLock()
 	defer g.systemConfigMu.RUnlock()
-	return g.systemConfig
+	return g.systemConfig, g.systemConfigSet
 }
 
 // RegisterSystemConfigChannel registers a channel to signify updates for the
@@ -608,7 +604,7 @@ func (g *Gossip) RegisterSystemConfigChannel() <-chan struct{} {
 	g.systemConfigChannels = append(g.systemConfigChannels, c)
 
 	// Notify the channel right away if we have a config.
-	if g.systemConfig != nil {
+	if g.systemConfigSet {
 		c <- struct{}{}
 	}
 
@@ -623,8 +619,8 @@ func (g *Gossip) updateSystemConfig(key string, content roachpb.Value) {
 		log.Fatalf("wrong key received on SystemConfig callback: %s", key)
 		return
 	}
-	cfg := &config.SystemConfig{}
-	if err := content.GetProto(cfg); err != nil {
+	cfg := config.SystemConfig{}
+	if err := content.GetProto(&cfg); err != nil {
 		log.Errorf("could not unmarshal system config on callback: %s", err)
 		return
 	}
@@ -632,6 +628,7 @@ func (g *Gossip) updateSystemConfig(key string, content roachpb.Value) {
 	g.systemConfigMu.Lock()
 	defer g.systemConfigMu.Unlock()
 	g.systemConfig = cfg
+	g.systemConfigSet = true
 	for _, c := range g.systemConfigChannels {
 		select {
 		case c <- struct{}{}:

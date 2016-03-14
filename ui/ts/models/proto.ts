@@ -228,24 +228,34 @@ module Models {
     /**
      * QueryResult is a single query result.
      *
-     * Source message = "TimeSeriesQueryResponse.Result"
+     * No direct source message. Historical relic.
      */
     export interface QueryResult {
       name: string;
-      datapoints: Datapoint[];
       downsampler: QueryAggregator;
       source_aggregator: QueryAggregator;
       derivative: QueryDerivative;
+      datapoints: Datapoint[];
     }
 
     /**
-     * QueryResultSet matches the successful output of the /ts/query
+     * Result is a single query result.
+     *
+     * Source message = "TimeSeriesQueryResponse.Result"
+     */
+    export interface Result {
+      datapoints: Datapoint[];
+      query: QueryRequest;
+    }
+
+    /**
+     * Results matches the successful output of the /ts/query
      * endpoint.
      *
      * Source message = "TimeSeriesQueryResponse"
      */
-    export interface QueryResultSet {
-      results: QueryResult[];
+    export interface Results {
+      results: Result[];
     }
 
     /**
@@ -295,17 +305,9 @@ module Models {
     export interface LogEntry {
       severity: number;
       time: number;
-      thread_id: number;
       file: string;
       line: number;
       format: string;
-      args: Arg[];
-      node_id: number;
-      store_id: number;
-      range_id: number;
-      method: number;
-      key: string;
-      stacks: string;
     }
 
     /*****************************

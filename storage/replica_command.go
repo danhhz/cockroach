@@ -21,7 +21,11 @@ package storage
 
 import (
 	"bytes"
+	"crypto/sha512"
+	"encoding/binary"
 	"fmt"
+	"math"
+
 	"math/rand"
 	"time"
 
@@ -34,16 +38,17 @@ import (
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/tracing"
+	"github.com/cockroachdb/cockroach/util/uuid"
 	"github.com/gogo/protobuf/proto"
 )
 
-// executeCmd switches over the method and multiplexes to execute the
-// appropriate storage API command. It returns the response, an error,
-// and a slice of intents that were skipped during execution.
-// If an error is returned, any returned intents should still be resolved.
-func (r *Replica) executeCmd(batch engine.Engine, ms *engine.MVCCStats, h roachpb.Header, args roachpb.Request) (roachpb.Response, []roachpb.Intent, *roachpb.Error) {
-	// Verify key is contained within range here to catch any range split
-	// or merge activity.
+// executeCmd switches over the method and multiplexes to execute the appropriate storage API
+// command. It returns the response, an error, and a slice of intents that were skipped during
+// execution.  If an error is returned, any returned intents should still be resolved.
+// remScanResults is the number of scan results remaining for this batch (MaxInt64 for no
+// limit).
+func (r *Replica) executeCmd(batch engine.Engine, ms *engine.MVCCStats, h roachpb.Header, remScanResults int64,
+	args roachpb.Request) (roachpb.Response, []roachpb.Intent, *roachpb.Error) {
 	ts := h.Timestamp
 
 	if _, ok := args.(*roachpb.NoopRequest); ok {
@@ -100,11 +105,11 @@ func (r *Replica) executeCmd(batch engine.Engine, ms *engine.MVCCStats, h roachp
 		reply = &resp
 	case *roachpb.ScanRequest:
 		var resp roachpb.ScanResponse
-		resp, intents, err = r.Scan(batch, h, *tArgs)
+		resp, intents, err = r.Scan(batch, h, remScanResults, *tArgs)
 		reply = &resp
 	case *roachpb.ReverseScanRequest:
 		var resp roachpb.ReverseScanResponse
-		resp, intents, err = r.ReverseScan(batch, h, *tArgs)
+		resp, intents, err = r.ReverseScan(batch, h, remScanResults, *tArgs)
 		reply = &resp
 	case *roachpb.BeginTransactionRequest:
 		var resp roachpb.BeginTransactionResponse
@@ -150,6 +155,14 @@ func (r *Replica) executeCmd(batch engine.Engine, ms *engine.MVCCStats, h roachp
 		var resp roachpb.LeaderLeaseResponse
 		resp, err = r.LeaderLease(batch, ms, h, *tArgs)
 		reply = &resp
+	case *roachpb.ComputeChecksumRequest:
+		var resp roachpb.ComputeChecksumResponse
+		resp, err = r.ComputeChecksum(batch, ms, h, *tArgs)
+		reply = &resp
+	case *roachpb.VerifyChecksumRequest:
+		var resp roachpb.VerifyChecksumResponse
+		resp, err = r.VerifyChecksum(batch, ms, h, *tArgs)
+		reply = &resp
 	default:
 		err = util.Errorf("unrecognized command %s", args.Method())
 	}
@@ -157,10 +170,6 @@ func (r *Replica) executeCmd(batch engine.Engine, ms *engine.MVCCStats, h roachp
 	if log.V(2) {
 		log.Infof("executed %s command %+v: %+v, err=%s", args.Method(), args, reply, err)
 	}
-
-	// Propagate the request timestamp (which may have changed).
-	// TODO(tschottdorf): really? Think this should be done by executeBatch.
-	reply.Header().Timestamp = ts
 
 	// Create a roachpb.Error by initializing txn from the request/response header.
 	var pErr *roachpb.Error
@@ -226,25 +235,54 @@ func (r *Replica) DeleteRange(batch engine.Engine, ms *engine.MVCCStats, h roach
 	return reply, err
 }
 
-// Scan scans the key range specified by start key through end key in ascending
-// order up to some maximum number of results.
-func (r *Replica) Scan(batch engine.Engine, h roachpb.Header, args roachpb.ScanRequest) (roachpb.ScanResponse, []roachpb.Intent, error) {
-	var reply roachpb.ScanResponse
-
-	rows, intents, err := engine.MVCCScan(batch, args.Key, args.EndKey, args.MaxResults, h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn)
-	reply.Rows = rows
-	return reply, intents, err
+// scanMaxResultsValue returns the max results value to pass to a scan or reverse scan request (0
+// for no limit).
+//    remScanResults is the number of remaining results for this batch (MaxInt64 for no
+// limit).
+//    scanMaxResults is the limit in this scan request (0 for no limit)
+func scanMaxResultsValue(remScanResults int64, scanMaxResults int64) int64 {
+	if remScanResults == math.MaxInt64 {
+		// Unlimited batch.
+		return scanMaxResults
+	}
+	if scanMaxResults != 0 && scanMaxResults < remScanResults {
+		// Scan limit is less than remaining batch limit.
+		return scanMaxResults
+	}
+	// Reamining batch limit is less than scan limit.
+	return remScanResults
 }
 
-// ReverseScan scans the key range specified by start key through end key in
-// descending order up to some maximum number of results.
-func (r *Replica) ReverseScan(batch engine.Engine, h roachpb.Header, args roachpb.ReverseScanRequest) (roachpb.ReverseScanResponse, []roachpb.Intent, error) {
-	var reply roachpb.ReverseScanResponse
+// Scan scans the key range specified by start key through end key in ascending order up to some
+// maximum number of results. remScanResults stores the number of scan results remaining for this
+// batch (MaxInt64 for no limit).
+func (r *Replica) Scan(batch engine.Engine, h roachpb.Header, remScanResults int64,
+	args roachpb.ScanRequest) (roachpb.ScanResponse, []roachpb.Intent, error) {
+	if remScanResults == 0 {
+		// We can't return any more results; skip the scan
+		return roachpb.ScanResponse{}, nil, nil
+	}
+	maxResults := scanMaxResultsValue(remScanResults, args.MaxResults)
 
-	rows, intents, err := engine.MVCCReverseScan(batch, args.Key, args.EndKey, args.MaxResults, h.Timestamp,
+	rows, intents, err := engine.MVCCScan(batch, args.Key, args.EndKey, maxResults, h.Timestamp,
 		h.ReadConsistency == roachpb.CONSISTENT, h.Txn)
-	reply.Rows = rows
-	return reply, intents, err
+	return roachpb.ScanResponse{Rows: rows}, intents, err
+}
+
+// ReverseScan scans the key range specified by start key through end key in descending order up to
+// some maximum number of results. remScanResults stores the number of scan results remaining for
+// this batch (MaxInt64 for no limit).
+func (r *Replica) ReverseScan(batch engine.Engine, h roachpb.Header, remScanResults int64,
+	args roachpb.ReverseScanRequest) (roachpb.ReverseScanResponse, []roachpb.Intent, error) {
+	if remScanResults == 0 {
+		// We can't return any more results; skip the scan
+		return roachpb.ReverseScanResponse{}, nil, nil
+	}
+	maxResults := scanMaxResultsValue(remScanResults, args.MaxResults)
+
+	rows, intents, err := engine.MVCCReverseScan(batch, args.Key, args.EndKey, maxResults,
+		h.Timestamp, h.ReadConsistency == roachpb.CONSISTENT, h.Txn)
+	return roachpb.ReverseScanResponse{Rows: rows}, intents, err
 }
 
 func verifyTransaction(h roachpb.Header, args roachpb.Request) error {
@@ -399,6 +437,9 @@ func (r *Replica) EndTransaction(batch engine.Engine, ms *engine.MVCCStats, h ro
 		desc = &mergeTrigger.UpdatedDesc
 	}
 
+	iterAndBuf := engine.GetIterAndBuf(batch)
+	defer iterAndBuf.Cleanup()
+
 	var externalIntents []roachpb.Intent
 	for _, span := range args.IntentSpans {
 		if err := func() error {
@@ -418,7 +459,7 @@ func (r *Replica) EndTransaction(batch engine.Engine, ms *engine.MVCCStats, h ro
 					// merge trigger.
 					resolveMs = nil
 				}
-				return engine.MVCCResolveWriteIntent(batch, resolveMs, intent)
+				return engine.MVCCResolveWriteIntentUsingIter(batch, iterAndBuf, resolveMs, intent)
 			}
 			// For intent ranges, cut into parts inside and outside our key
 			// range. Resolve locally inside, delegate the rest. In particular,
@@ -431,7 +472,7 @@ func (r *Replica) EndTransaction(batch engine.Engine, ms *engine.MVCCStats, h ro
 			}
 			if inSpan != nil {
 				intent.Span = *inSpan
-				_, err := engine.MVCCResolveWriteIntentRange(batch, ms, intent, 0)
+				_, err := engine.MVCCResolveWriteIntentRangeUsingIter(batch, iterAndBuf, ms, intent, 0)
 				return err
 			}
 			return nil
@@ -796,7 +837,6 @@ func (r *Replica) RangeLookup(batch engine.Engine, h roachpb.Header, args roachp
 // coordinator. Returns the updated transaction.
 func (r *Replica) HeartbeatTxn(batch engine.Engine, ms *engine.MVCCStats, h roachpb.Header, args roachpb.HeartbeatTxnRequest) (roachpb.HeartbeatTxnResponse, error) {
 	var reply roachpb.HeartbeatTxnResponse
-	ts := h.Timestamp // all we're going to use from the header.
 
 	if err := verifyTransaction(h, &args); err != nil {
 		return reply, err
@@ -819,7 +859,7 @@ func (r *Replica) HeartbeatTxn(batch engine.Engine, ms *engine.MVCCStats, h roac
 		if txn.LastHeartbeat == nil {
 			txn.LastHeartbeat = &roachpb.Timestamp{}
 		}
-		txn.LastHeartbeat.Forward(ts)
+		txn.LastHeartbeat.Forward(args.Now)
 		if err := engine.MVCCPutProto(batch, ms, key, roachpb.ZeroTimestamp, nil, &txn); err != nil {
 			return reply, err
 		}
@@ -1257,6 +1297,247 @@ func (r *Replica) LeaderLease(batch engine.Engine, ms *engine.MVCCStats, h roach
 	}
 
 	return reply, nil
+}
+
+// CheckConsistency runs a consistency check on the range. It first applies
+// a ComputeChecksum command on the range. It then applies a VerifyChecksum
+// command passing along a locally computed checksum for the range.
+func (r *Replica) CheckConsistency(args roachpb.CheckConsistencyRequest, desc *roachpb.RangeDescriptor) (roachpb.CheckConsistencyResponse, *roachpb.Error) {
+	key := desc.StartKey.AsRawKey()
+	endKey := desc.EndKey.AsRawKey()
+	notifyChan := make(chan []byte, 1)
+	id := uuid.MakeV4()
+	r.setChecksumNotify(id, notifyChan)
+	// Send a ComputeChecksum to all the replicas of the range.
+	start := time.Now()
+	{
+		var ba roachpb.BatchRequest
+		ba.RangeID = r.Desc().RangeID
+		checkArgs := &roachpb.ComputeChecksumRequest{
+			Span: roachpb.Span{
+				Key:    key,
+				EndKey: endKey,
+			},
+			Version:    replicaChecksumVersion,
+			ChecksumID: id,
+		}
+		ba.Add(checkArgs)
+		_, pErr := r.Send(r.context(), ba)
+		if pErr != nil {
+			return roachpb.CheckConsistencyResponse{}, pErr
+		}
+	}
+	// wait for local checksum and collect it.
+	checksum := <-notifyChan
+
+	if checksum == nil {
+		// Don't bother verifying the checksum.
+		return roachpb.CheckConsistencyResponse{}, roachpb.NewErrorf("unable to compute checksum for range [%v, %v]", key, endKey)
+	}
+
+	// Wait for a bit to improve the probability that all
+	// the replicas have computed their checksum. We do this
+	// because VerifyChecksum blocks on every replica until the
+	// computed checksum is available.
+	computeChecksumDuration := time.Since(start)
+	time.Sleep(computeChecksumDuration)
+	// Send a VerifyChecksum to all the replicas of the range.
+	{
+		var ba roachpb.BatchRequest
+		ba.RangeID = r.Desc().RangeID
+		checkArgs := &roachpb.VerifyChecksumRequest{
+			Span: roachpb.Span{
+				Key:    key,
+				EndKey: endKey,
+			},
+			Version:    replicaChecksumVersion,
+			ChecksumID: id,
+			Checksum:   checksum,
+		}
+		ba.Add(checkArgs)
+		_, pErr := r.Send(r.context(), ba)
+		if pErr != nil {
+			return roachpb.CheckConsistencyResponse{}, pErr
+		}
+	}
+	return roachpb.CheckConsistencyResponse{}, nil
+}
+
+const (
+	replicaChecksumVersion    = 0
+	replicaChecksumGCInterval = time.Hour
+)
+
+// setChecksumNotify sets a notification channel on which the checksum
+// from the result of ComputeChecksum is sent.
+func (r *Replica) setChecksumNotify(id uuid.UUID, notify chan []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.mu.checksumNotify[id]; ok {
+		panic(fmt.Sprintf("id %v already exists", id))
+	}
+	r.mu.checksumNotify[id] = notify
+	return
+}
+
+// computeChecksumDone adds the computed checksum, sets a deadline for GCing the
+// checksum, and sends out a notification.
+func (r *Replica) computeChecksumDone(id uuid.UUID, sha []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.mu.checksums[id]; ok {
+		c.ok = true
+		c.checksum = sha
+		c.gcTimestamp = time.Now().Add(replicaChecksumGCInterval)
+		r.mu.checksums[id] = c
+	} else {
+		panic("checksum has been GCed")
+	}
+	notify := r.mu.checksumNotify[id]
+	delete(r.mu.checksumNotify, id)
+	if notify != nil {
+		notify <- sha
+	}
+}
+
+// ComputeChecksum starts the process of computing a checksum on the
+// replica at a particular snapshot. The checksum is later verified
+// through the VerifyChecksum request.
+func (r *Replica) ComputeChecksum(batch engine.Engine, ms *engine.MVCCStats, h roachpb.Header, args roachpb.ComputeChecksumRequest) (roachpb.ComputeChecksumResponse, error) {
+	if args.Version != replicaChecksumVersion {
+		log.Errorf("Incompatible versions: e=%d, v=%d", replicaChecksumVersion, args.Version)
+		return roachpb.ComputeChecksumResponse{}, nil
+	}
+	stopper := r.store.Stopper()
+	id := args.ChecksumID
+	now := time.Now()
+	r.mu.Lock()
+	if _, ok := r.mu.checksums[id]; ok {
+		// A previous attempt was made to compute the checksum.
+		r.mu.Unlock()
+		return roachpb.ComputeChecksumResponse{}, nil
+	}
+
+	// GC old entries.
+	var oldEntries []uuid.UUID
+	for id, val := range r.mu.checksums {
+		// The timestamp is only valid when the checksum is set.
+		if val.checksum != nil && now.After(val.gcTimestamp) {
+			oldEntries = append(oldEntries, id)
+		}
+	}
+	for _, id := range oldEntries {
+		delete(r.mu.checksums, id)
+	}
+
+	// Create an entry with checksum == nil and gcTimestamp unset.
+	r.mu.checksums[id] = replicaChecksum{}
+	desc := *r.mu.desc
+	r.mu.Unlock()
+	snap := r.store.NewSnapshot()
+
+	// Compute SHA asynchronously and store it in a map by UUID.
+	if !stopper.RunAsyncTask(func() {
+		defer snap.Close()
+		sha, err := r.sha512(desc, snap)
+		if err != nil {
+			log.Error(err)
+			sha = nil
+		}
+		r.computeChecksumDone(id, sha)
+	}) {
+		defer snap.Close()
+		// Set checksum to nil.
+		r.computeChecksumDone(id, nil)
+	}
+	return roachpb.ComputeChecksumResponse{}, nil
+}
+
+// sha512 computes the SHA512 hash of all the replica data at the snapshot.
+func (r *Replica) sha512(desc roachpb.RangeDescriptor, snap engine.Engine) ([]byte, error) {
+	hasher := sha512.New()
+	// Iterate over all the data in the range.
+	iter := newReplicaDataIterator(&desc, snap, true /* replicatedOnly */)
+	defer iter.Close()
+	for ; iter.Valid(); iter.Next() {
+		key := iter.Key()
+		value := iter.Value()
+		// Encode the length of the key and value.
+		if err := binary.Write(hasher, binary.LittleEndian, int64(len(key.Key))); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(hasher, binary.LittleEndian, int64(len(value))); err != nil {
+			return nil, err
+		}
+		if _, err := hasher.Write(key.Key); err != nil {
+			return nil, err
+		}
+		timestamp, err := key.Timestamp.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := hasher.Write(timestamp); err != nil {
+			return nil, err
+		}
+		if _, err := hasher.Write(value); err != nil {
+			return nil, err
+		}
+	}
+	sha := make([]byte, 0, sha512.Size)
+	return hasher.Sum(sha), nil
+}
+
+// maybeSetChecksumNotify may set a channel to receive a checksum
+// notification if the checksum is unavailable.
+func (r *Replica) maybeSetChecksumNotify(id uuid.UUID) chan []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.mu.checksums[id]; ok && !c.ok {
+		// Checksum hasn't been computed yet; set notification.
+		if r.mu.checksumNotify[id] != nil {
+			panic("existing notification exists")
+		}
+		notify := make(chan []byte, 1)
+		r.mu.checksumNotify[id] = notify
+		return notify
+	}
+	return nil
+}
+
+// VerifyChecksum verifies the checksum that was computed through a
+// ComputeChecksum request.
+func (r *Replica) VerifyChecksum(batch engine.Engine, ms *engine.MVCCStats, h roachpb.Header, args roachpb.VerifyChecksumRequest) (roachpb.VerifyChecksumResponse, error) {
+	if args.Version != replicaChecksumVersion {
+		log.Errorf("Incompatible versions: e=%d, v=%d", replicaChecksumVersion, args.Version)
+		return roachpb.VerifyChecksumResponse{}, nil
+	}
+	id := args.ChecksumID
+	notify := r.maybeSetChecksumNotify(id)
+	if notify != nil {
+		now := time.Now()
+		<-notify
+		if log.V(1) {
+			log.Info("waited for compute checksum for %s", time.Since(now))
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.mu.checksums[id]; ok {
+		if c.ok {
+			if c.checksum != nil && !bytes.Equal(c.checksum, args.Checksum) {
+				if p := r.store.ctx.TestingMocker.BadChecksumPanic; p != nil {
+					p()
+				} else {
+					// TODO(.*): see #5051.
+					log.Errorf("checksum mismatch: e = %x, v = %x", args.Checksum, c.checksum)
+				}
+			}
+		} else {
+			panic("received checksum notification but no checksum")
+		}
+	}
+	return roachpb.VerifyChecksumResponse{}, nil
 }
 
 // AdminSplit divides the range into into two ranges, using either

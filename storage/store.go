@@ -94,6 +94,7 @@ func TestStoreContext() StoreContext {
 		RaftHeartbeatIntervalTicks: 1,
 		RaftElectionTimeoutTicks:   2,
 		ScanInterval:               10 * time.Minute,
+		ConsistencyCheckInterval:   10 * time.Minute,
 	}
 }
 
@@ -251,27 +252,29 @@ type replicaDescCacheKey struct {
 // A Store maintains a map of ranges by start key. A Store corresponds
 // to one physical device.
 type Store struct {
-	Ident           roachpb.StoreIdent
-	ctx             StoreContext
-	db              *client.DB
-	engine          engine.Engine   // The underlying key-value store
-	allocator       Allocator       // Makes allocation decisions
-	rangeIDAlloc    *idAllocator    // Range ID allocator
-	gcQueue         *gcQueue        // Garbage collection queue
-	splitQueue      *splitQueue     // Range splitting queue
-	verifyQueue     *verifyQueue    // Checksum verification queue
-	replicateQueue  *replicateQueue // Replication queue
-	replicaGCQueue  *replicaGCQueue // Replica GC queue
-	raftLogQueue    *raftLogQueue   // Raft Log Truncation queue
-	scanner         *replicaScanner // Replica scanner
-	metrics         *storeMetrics
-	wakeRaftLoop    chan struct{}
-	started         int32
-	stopper         *stop.Stopper
-	startedAt       int64
-	nodeDesc        *roachpb.NodeDescriptor
-	initComplete    sync.WaitGroup // Signaled by async init tasks
-	raftRequestChan chan *RaftMessageRequest
+	Ident                   roachpb.StoreIdent
+	ctx                     StoreContext
+	db                      *client.DB
+	engine                  engine.Engine            // The underlying key-value store
+	allocator               Allocator                // Makes allocation decisions
+	rangeIDAlloc            *idAllocator             // Range ID allocator
+	gcQueue                 *gcQueue                 // Garbage collection queue
+	splitQueue              *splitQueue              // Range splitting queue
+	verifyQueue             *verifyQueue             // Checksum verification queue
+	replicateQueue          *replicateQueue          // Replication queue
+	replicaGCQueue          *replicaGCQueue          // Replica GC queue
+	raftLogQueue            *raftLogQueue            // Raft Log Truncation queue
+	scanner                 *replicaScanner          // Replica scanner
+	replicaConsistencyQueue *replicaConsistencyQueue // Replica consistency check queue
+	consistencyScanner      *replicaScanner          // Consistency checker scanner
+	metrics                 *storeMetrics
+	wakeRaftLoop            chan struct{}
+	started                 int32
+	stopper                 *stop.Stopper
+	startedAt               int64
+	nodeDesc                *roachpb.NodeDescriptor
+	initComplete            sync.WaitGroup // Signaled by async init tasks
+	raftRequestChan         chan *RaftMessageRequest
 
 	// Locking notes: To avoid deadlocks, the following lock order
 	// must be obeyed: processRaftMu < Store.mu.Mutex <
@@ -344,6 +347,10 @@ type StoreContext struct {
 	// stores.
 	ScanMaxIdleTime time.Duration
 
+	// ConsistencyCheckInterval is the default time period in between consecutive
+	// consistency checks on a range.
+	ConsistencyCheckInterval time.Duration
+
 	// TimeUntilStoreDead is the time after which if there is no new gossiped
 	// information about a store, it can be considered dead.
 	TimeUntilStoreDead time.Duration
@@ -366,6 +373,9 @@ type StoreContext struct {
 type StoreTestingMocker struct {
 	// A callback to be called when executing every replica command.
 	TestingCommandFilter CommandFilter
+	// A callback to be called instead of panicking due to a
+	// checksum mismatch in VerifyChecksum()
+	BadChecksumPanic func()
 }
 
 type storeMetrics struct {
@@ -391,6 +401,21 @@ type storeMetrics struct {
 	lastUpdateNanos *metric.Gauge
 	capacity        *metric.Gauge
 	available       *metric.Gauge
+	sysBytes        *metric.Gauge
+	sysCount        *metric.Gauge
+
+	rdbBlockCacheHits           *metric.Gauge
+	rdbBlockCacheMisses         *metric.Gauge
+	rdbBlockCacheUsage          *metric.Gauge
+	rdbBlockCachePinnedUsage    *metric.Gauge
+	rdbBloomFilterPrefixChecked *metric.Gauge
+	rdbBloomFilterPrefixUseful  *metric.Gauge
+	rdbMemtableHits             *metric.Gauge
+	rdbMemtableMisses           *metric.Gauge
+	rdbMemtableTotalSize        *metric.Gauge
+	rdbFlushes                  *metric.Gauge
+	rdbCompactions              *metric.Gauge
+	rdbTableReadersMemEstimate  *metric.Gauge
 
 	// Stats for efficient merges.
 	// TODO(mrtracy): This should be removed as part of #4465. This is only
@@ -422,6 +447,22 @@ func newStoreMetrics() *storeMetrics {
 		lastUpdateNanos:      storeRegistry.Gauge("lastupdatenanos"),
 		capacity:             storeRegistry.Gauge("capacity"),
 		available:            storeRegistry.Gauge("capacity.available"),
+		sysBytes:             storeRegistry.Gauge("sysbytes"),
+		sysCount:             storeRegistry.Gauge("syscount"),
+
+		// RocksDB stats.
+		rdbBlockCacheHits:           storeRegistry.Gauge("rocksdb.block.cache.hits"),
+		rdbBlockCacheMisses:         storeRegistry.Gauge("rocksdb.block.cache.misses"),
+		rdbBlockCacheUsage:          storeRegistry.Gauge("rocksdb.block.cache.usage"),
+		rdbBlockCachePinnedUsage:    storeRegistry.Gauge("rocksdb.block.cache.pinned-usage"),
+		rdbBloomFilterPrefixChecked: storeRegistry.Gauge("rocksdb.bloom.filter.prefix.checked"),
+		rdbBloomFilterPrefixUseful:  storeRegistry.Gauge("rocksdb.bloom.filter.prefix.useful"),
+		rdbMemtableHits:             storeRegistry.Gauge("rocksdb.memtable.hits"),
+		rdbMemtableMisses:           storeRegistry.Gauge("rocksdb.memtable.misses"),
+		rdbMemtableTotalSize:        storeRegistry.Gauge("rocksdb.memtable.total-size"),
+		rdbFlushes:                  storeRegistry.Gauge("rocksdb.flushes"),
+		rdbCompactions:              storeRegistry.Gauge("rocksdb.compactions"),
+		rdbTableReadersMemEstimate:  storeRegistry.Gauge("rocksdb.table-readers-mem-estimate"),
 	}
 }
 
@@ -443,6 +484,8 @@ func (sm *storeMetrics) updateMVCCGaugesLocked() {
 	sm.intentAge.Update(sm.stats.IntentAge)
 	sm.gcBytesAge.Update(sm.stats.GCBytesAge)
 	sm.lastUpdateNanos.Update(sm.stats.LastUpdateNanos)
+	sm.sysBytes.Update(sm.stats.SysBytes)
+	sm.sysCount.Update(sm.stats.SysCount)
 }
 
 func (sm *storeMetrics) updateCapacityGauges(capacity roachpb.StoreCapacity) {
@@ -474,6 +517,24 @@ func (sm *storeMetrics) subtractMVCCStats(stats engine.MVCCStats) {
 	sm.updateMVCCGaugesLocked()
 }
 
+func (sm *storeMetrics) updateRocksDBStats(stats engine.Stats) {
+	// We do not grab a lock here, because it's not possible to get a point-in-
+	// time snapshot of RocksDB stats. Retrieving RocksDB stats doesn't grab any
+	// locks, and there's no way to retrieve multiple stats in a single operation.
+	sm.rdbBlockCacheHits.Update(int64(stats.BlockCacheHits))
+	sm.rdbBlockCacheMisses.Update(int64(stats.BlockCacheMisses))
+	sm.rdbBlockCacheUsage.Update(int64(stats.BlockCacheUsage))
+	sm.rdbBlockCachePinnedUsage.Update(int64(stats.BlockCachePinnedUsage))
+	sm.rdbBloomFilterPrefixUseful.Update(int64(stats.BloomFilterPrefixUseful))
+	sm.rdbBloomFilterPrefixChecked.Update(int64(stats.BloomFilterPrefixChecked))
+	sm.rdbMemtableHits.Update(int64(stats.MemtableHits))
+	sm.rdbMemtableMisses.Update(int64(stats.MemtableMisses))
+	sm.rdbMemtableTotalSize.Update(int64(stats.MemtableTotalSize))
+	sm.rdbFlushes.Update(int64(stats.Flushes))
+	sm.rdbCompactions.Update(int64(stats.Compactions))
+	sm.rdbTableReadersMemEstimate.Update(int64(stats.TableReadersMemEstimate))
+}
+
 // Valid returns true if the StoreContext is populated correctly.
 // We don't check for Gossip and DB since some of our tests pass
 // that as nil.
@@ -481,7 +542,7 @@ func (sc *StoreContext) Valid() bool {
 	return sc.Clock != nil && sc.Transport != nil &&
 		sc.RaftTickInterval != 0 && sc.RaftHeartbeatIntervalTicks > 0 &&
 		sc.RaftElectionTimeoutTicks > 0 && sc.ScanInterval > 0 &&
-		sc.Tracer != nil
+		sc.ConsistencyCheckInterval > 0 && sc.Tracer != nil
 }
 
 // setDefaults initializes unset fields in StoreConfig to values
@@ -544,6 +605,11 @@ func NewStore(ctx StoreContext, eng engine.Engine, nodeDesc *roachpb.NodeDescrip
 	s.replicaGCQueue = newReplicaGCQueue(s.db, s.ctx.Gossip)
 	s.raftLogQueue = newRaftLogQueue(s.db, s.ctx.Gossip)
 	s.scanner.AddQueues(s.gcQueue, s.splitQueue, s.verifyQueue, s.replicateQueue, s.replicaGCQueue, s.raftLogQueue)
+
+	// Add consistency check scanner.
+	s.consistencyScanner = newReplicaScanner(ctx.ConsistencyCheckInterval, ctx.ScanMaxIdleTime, newStoreRangeSet(s))
+	s.replicaConsistencyQueue = newReplicaConsistencyQueue(s.ctx.Gossip)
+	s.consistencyScanner.AddQueues(s.replicaConsistencyQueue)
 
 	return s
 }
@@ -696,7 +762,7 @@ func (s *Store) Start(stopper *stop.Stopper) error {
 			for {
 				select {
 				case <-gossipUpdateC:
-					cfg := s.ctx.Gossip.GetSystemConfig()
+					cfg, _ := s.ctx.Gossip.GetSystemConfig()
 					s.systemGossipUpdate(cfg)
 				case <-s.stopper.ShouldStop():
 					return
@@ -721,6 +787,17 @@ func (s *Store) Start(stopper *stop.Stopper) error {
 				return
 			}
 		})
+
+		// Start the consistency scanner.
+		s.stopper.RunWorker(func() {
+			select {
+			case <-s.ctx.Gossip.Connected:
+				s.consistencyScanner.Start(s.ctx.Clock, s.stopper)
+			case <-s.stopper.ShouldStop():
+				return
+			}
+		})
+
 	}
 
 	// Set the started flag (for unittests).
@@ -793,7 +870,7 @@ func (s *Store) startGossip() {
 // timeouts. The retry loop makes sure we try hard to keep asking for
 // the lease instead of waiting for the next sentinelGossipInterval
 // to transpire.
-func (s *Store) maybeGossipFirstRange() *roachpb.Error {
+func (s *Store) maybeGossipFirstRange() error {
 	retryOptions := retry.Options{
 		InitialBackoff: 100 * time.Millisecond, // first backoff at 100ms
 		MaxBackoff:     1 * time.Second,        // max backoff is 1s
@@ -805,7 +882,7 @@ func (s *Store) maybeGossipFirstRange() *roachpb.Error {
 		if rng != nil {
 			pErr := rng.maybeGossipFirstRange()
 			if nlErr, ok := pErr.GetDetail().(*roachpb.NotLeaderError); !ok || nlErr.Leader != nil {
-				return pErr
+				return pErr.GoError()
 			}
 		} else {
 			return nil
@@ -816,7 +893,7 @@ func (s *Store) maybeGossipFirstRange() *roachpb.Error {
 
 // maybeGossipSystemConfig looks for the range containing SystemConfig keys and
 // lets that range gossip them.
-func (s *Store) maybeGossipSystemConfig() *roachpb.Error {
+func (s *Store) maybeGossipSystemConfig() error {
 	rng := s.LookupReplica(roachpb.RKey(keys.SystemConfigSpan.Key), nil)
 	if rng == nil {
 		// This store has no range with this configuration.
@@ -827,12 +904,12 @@ func (s *Store) maybeGossipSystemConfig() *roachpb.Error {
 	// have an active lease but we still failed to obtain it), return
 	// that error.
 	_, pErr := rng.getLeaseForGossip(s.Context(nil))
-	return pErr
+	return pErr.GoError()
 }
 
 // systemGossipUpdate is a callback for gossip updates to
 // the system config which affect range split boundaries.
-func (s *Store) systemGossipUpdate(cfg *config.SystemConfig) {
+func (s *Store) systemGossipUpdate(cfg config.SystemConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// For every range, update its MaxBytes and check if it needs to be split.
@@ -1065,6 +1142,9 @@ func (s *Store) Stopper() *stop.Stopper { return s.stopper }
 // Tracer accessor.
 func (s *Store) Tracer() opentracing.Tracer { return s.ctx.Tracer }
 
+// TestingMocker accessor.
+func (s *Store) TestingMocker() *StoreTestingMocker { return &s.ctx.TestingMocker }
+
 // NewRangeDescriptor creates a new descriptor based on start and end
 // keys and the supplied roachpb.Replicas slice. It allocates new
 // replica IDs to fill out the supplied replicas.
@@ -1256,10 +1336,13 @@ func (s *Store) removeReplicaImpl(rep *Replica, origDesc roachpb.RangeDescriptor
 		return util.Errorf("couldn't find range in replicasByKey btree")
 	}
 	s.scanner.RemoveReplica(rep)
+	s.consistencyScanner.RemoveReplica(rep)
 
-	// Grab stats before calling Destroy. The stats aren't currently altered by
-	// Destroy, but that is not necessarily a guarantee.
-	stats := rep.GetMVCCStats()
+	// Adjust stats before calling Destroy. This can be called before or after
+	// Destroy, but this configuration helps avoid races in stat verification
+	// tests.
+	s.metrics.subtractMVCCStats(rep.GetMVCCStats())
+	s.metrics.rangeCount.Dec(1)
 
 	// TODO(bdarnell): This is fairly expensive to do under store.Mutex, but
 	// doing it outside the lock is tricky due to the risk that a replica gets
@@ -1270,16 +1353,13 @@ func (s *Store) removeReplicaImpl(rep *Replica, origDesc roachpb.RangeDescriptor
 		}
 	}
 
-	// Subtract the removed replica's stats from the store-level stats.
-	s.metrics.subtractMVCCStats(stats)
-	s.metrics.rangeCount.Dec(1)
 	return nil
 }
 
 // destroyReplicaData deletes all data associated with a replica, leaving a tombstone.
 // If a Replica object exists, use Replica.Destroy instead of this method.
 func (s *Store) destroyReplicaData(desc *roachpb.RangeDescriptor) error {
-	iter := newReplicaDataIterator(desc, s.Engine())
+	iter := newReplicaDataIterator(desc, s.Engine(), false /* !replicatedOnly */)
 	defer iter.Close()
 	batch := s.Engine().NewBatch()
 	defer batch.Close()
@@ -1389,9 +1469,17 @@ func (s *Store) ReplicaCount() int {
 	return len(s.mu.replicas)
 }
 
-// Send fetches a range based on the header's replica, assembles
-// method, args & reply into a Raft Cmd struct and executes the
-// command using the fetched range.
+// Send fetches a range based on the header's replica, assembles method, args &
+// reply into a Raft Cmd struct and executes the command using the fetched
+// range.
+// An incoming request may be transactional or not. If it is not transactional,
+// the timestamp at which it executes may be higher than that optionally
+// specified through the incoming BatchRequest, and it is not guaranteed that
+// all operations are written at the same timestamp. If it is transactional, a
+// timestamp must not be set - it is deduced automatically from the
+// transaction. Should a transactional operation be forced to a higher
+// timestamp (for instance due to the timestamp cache), the response will have
+// a transaction set which should be used to update the client transaction.
 func (s *Store) Send(ctx context.Context, ba roachpb.BatchRequest) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
 	ctx = s.Context(ctx)
 	sp, cleanupSp := tracing.SpanFromContext(opStore, s.Tracer(), ctx)
@@ -1404,34 +1492,50 @@ func (s *Store) Send(ctx context.Context, ba roachpb.BatchRequest) (br *roachpb.
 			return nil, roachpb.NewError(err)
 		}
 	}
-	if !ba.Timestamp.Equal(roachpb.ZeroTimestamp) {
-		if s.Clock().MaxOffset() > 0 {
-			// Once a command is submitted to raft, all replicas' logical
-			// clocks will be ratcheted forward to match. If the command
-			// appears to come from a node with a bad clock, reject it now
-			// before we reach that point.
-			offset := time.Duration(ba.Timestamp.WallTime - s.Clock().PhysicalNow())
-			if offset > s.Clock().MaxOffset() {
-				return nil, roachpb.NewErrorf("Rejecting command with timestamp in the future: %d (%s ahead)",
-					ba.Timestamp.WallTime, offset)
-			}
+
+	if ba.Txn == nil {
+		// When not transactional, allow empty timestamp and simply use local
+		// clock.
+		if ba.Timestamp.Equal(roachpb.ZeroTimestamp) {
+			ba.Timestamp.Forward(s.Clock().Now())
 		}
-		// Update our clock with the incoming request timestamp. This
-		// advances the local node's clock to a high water mark from
-		// amongst all nodes with which it has interacted.
-		// TODO(tschottdorf): see executeBatch for an explanation of the weird
-		// logical ticks added here.
-		ba.Timestamp.Add(0, int32(len(ba.Requests))-1)
-	} else if ba.Txn == nil {
-		// TODO(tschottdorf): possibly consolidate this with other locations
-		// doing the same (but it's definitely required here).
-		// TODO(tschottdorf): see executeBatch for an explanation of the weird
-		// logical ticks added here.
-		ba.Timestamp.Forward(s.Clock().Now().Add(0, int32(len(ba.Requests))-1))
+
+		if ba.IsWrite() {
+			// If a batch is non-transactional, self-overlapping writes at the
+			// same timestamp would run into a WriteTooOldError. Pretend that
+			// some more logical clock ticks happened; when executing, we'll
+			// spread out the requests over those ticks.
+			// We're not using non-transactional requests for much, so this is
+			// an acceptable solution for the time being.
+			ba.Timestamp.Forward(ba.Timestamp.Add(0, int32(len(ba.Requests))-1))
+		}
+	} else if !ba.Timestamp.Equal(roachpb.ZeroTimestamp) {
+		return nil, roachpb.NewErrorf("transactional request must not set batch timestamp")
+	} else if ba.IsReadOnly() {
+		// OrigTimestamp is the read timestamp of the transaction throughout
+		// its lifetime.
+		ba.Timestamp = ba.Txn.OrigTimestamp
+	} else {
+		// Writes happen at the provisional commit timestamp.
+		ba.Timestamp = ba.Txn.Timestamp
 	}
-	// We update the clock and hold on to the timestamp - we know that any
-	// write with a higher timestamp we run into later must have started
-	// after this point in (absolute) time.
+
+	if s.Clock().MaxOffset() > 0 {
+		// Once a command is submitted to raft, all replicas' logical
+		// clocks will be ratcheted forward to match. If the command
+		// appears to come from a node with a bad clock, reject it now
+		// before we reach that point.
+		offset := time.Duration(ba.Timestamp.WallTime - s.Clock().PhysicalNow())
+		if offset > s.Clock().MaxOffset() {
+			return nil, roachpb.NewErrorf("Rejecting command with timestamp in the future: %d (%s ahead)",
+				ba.Timestamp.WallTime, offset)
+		}
+	}
+	// Update our clock with the incoming request timestamp. This advances the
+	// local node's clock to a high water mark from all nodes with which it has
+	// interacted. We hold on to the resulting timestamp - we know that any
+	// write with a higher timestamp we run into later must have started after
+	// this point in (absolute) time.
 	now := s.ctx.Clock.Update(ba.Timestamp)
 
 	if ba.Txn != nil {
@@ -1987,7 +2091,7 @@ func raftEntryFormatter(data []byte) string {
 // GetStatus fetches the latest store status from the stored value on the cluster.
 // Returns nil if the scanner has not yet run. The scanner runs once every
 // ctx.ScanInterval.
-func (s *Store) GetStatus() (*StoreStatus, *roachpb.Error) {
+func (s *Store) GetStatus() (*StoreStatus, error) {
 	if s.scanner.Count() == 0 {
 		// The scanner hasn't completed a first run yet.
 		return nil, nil
@@ -1995,7 +2099,7 @@ func (s *Store) GetStatus() (*StoreStatus, *roachpb.Error) {
 	key := keys.StoreStatusKey(int32(s.Ident.StoreID))
 	status := &StoreStatus{}
 	if pErr := s.db.GetProto(key, status); pErr != nil {
-		return nil, pErr
+		return nil, pErr.GoError()
 	}
 	return status, nil
 }
@@ -2008,8 +2112,8 @@ func (s *Store) GetStatus() (*StoreStatus, *roachpb.Error) {
 func (s *Store) computeReplicationStatus(now int64) (
 	leaderRangeCount, replicatedRangeCount, availableRangeCount int64) {
 	// Load the system config.
-	cfg := s.Gossip().GetSystemConfig()
-	if cfg == nil {
+	cfg, ok := s.Gossip().GetSystemConfig()
+	if !ok {
 		log.Infof("system config not yet available")
 		return
 	}
@@ -2072,6 +2176,14 @@ func (s *Store) ComputeMetrics() error {
 	leaderRangeCount, replicatedRangeCount, availableRangeCount :=
 		s.computeReplicationStatus(now)
 	s.metrics.updateReplicationGauges(leaderRangeCount, replicatedRangeCount, availableRangeCount)
+
+	// Get the latest RocksDB stats.
+	stats, err := s.engine.GetStats()
+	if err != nil {
+		return err
+	}
+	s.metrics.updateRocksDBStats(*stats)
+
 	return nil
 }
 

@@ -31,8 +31,8 @@ import (
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/storage"
 	"github.com/cockroachdb/cockroach/util"
-	"github.com/cockroachdb/cockroach/util/cache"
 	"github.com/cockroachdb/cockroach/util/hlc"
+	"github.com/cockroachdb/cockroach/util/interval"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/metric"
 	"github.com/cockroachdb/cockroach/util/stop"
@@ -72,7 +72,7 @@ type txnMetadata struct {
 	// keys stores key ranges affected by this transaction through this
 	// coordinator. By keeping this record, the coordinator will be able
 	// to update the write intent when the transaction is committed.
-	keys *cache.IntervalCache
+	keys interval.RangeGroup
 
 	// lastUpdateNanos is the latest wall time in nanos the client sent
 	// transaction operations to this coordinator. Accessed and updated
@@ -93,37 +93,24 @@ type txnMetadata struct {
 	txnEnd chan struct{}
 }
 
-// addKeyRange adds the specified key range to the interval cache,
+// addKeyRange adds the specified key range to the range group,
 // taking care not to add this range if existing entries already
 // completely cover the range.
-func (tm *txnMetadata) addKeyRange(start, end roachpb.Key) {
+func addKeyRange(keys interval.RangeGroup, start, end roachpb.Key) {
 	// This gives us a memory-efficient end key if end is empty.
 	// The most common case for keys in the intents interval map
-	// is for single keys. However, the interval cache requires
+	// is for single keys. However, the range group requires
 	// a non-empty interval, so we create two key slices which
 	// share the same underlying byte array.
 	if len(end) == 0 {
-		end = start.Next()
+		end = start.ShallowNext()
 		start = end[:len(start)]
 	}
-	key := tm.keys.MakeKey(start, end)
-	for _, o := range tm.keys.GetOverlaps(key.Start, key.End) {
-		if o.Key.Contains(key) {
-			return
-		} else if key.Contains(*o.Key) {
-			tm.keys.DelEntry(o.Entry)
-		}
+	keyR := interval.Range{
+		Start: interval.Comparable(start),
+		End:   interval.Comparable(end),
 	}
-
-	// Since no existing key range fully covered this range, add it now. The
-	// strange assignment to pkey makes sure we delay the heap allocation until
-	// we know it is necessary.
-	alloc := struct {
-		key   cache.IntervalKey
-		entry cache.Entry
-	}{key: key}
-	alloc.entry.Key = &alloc.key
-	tm.keys.AddEntry(&alloc.entry)
+	keys.Add(keyR)
 }
 
 // setLastUpdate updates the wall time (in nanoseconds) since the most
@@ -146,19 +133,22 @@ func (tm *txnMetadata) hasClientAbandonedCoord(nowNanos int64) bool {
 	return tm.getLastUpdate() < timeout
 }
 
-// intentSpans collects the spans of the intents to be resolved for the
+// collectIntentSpans collects the spans of the intents to be resolved for the
 // transaction. It does not create copies, so the caller must not alter the
-// returned data.
-func (tm *txnMetadata) intentSpans() []roachpb.Span {
-	intents := make([]roachpb.Span, 0, tm.keys.Len())
-	for _, o := range tm.keys.GetOverlaps(roachpb.KeyMin, roachpb.KeyMax) {
-		intent := roachpb.Span{
-			Key: roachpb.Key(o.Key.Start),
+// returned data. Usually called with txnMeta.keys.
+func collectIntentSpans(keys interval.RangeGroup) []roachpb.Span {
+	intents := make([]roachpb.Span, 0, keys.Len())
+	if err := keys.ForEach(func(r interval.Range) error {
+		sp := roachpb.Span{
+			Key: roachpb.Key(r.Start),
 		}
-		if endKey := roachpb.Key(o.Key.End); !intent.Key.IsPrev(endKey) {
-			intent.EndKey = endKey
+		if endKey := roachpb.Key(r.End); !sp.Key.IsPrev(endKey) {
+			sp.EndKey = endKey
 		}
-		intents = append(intents, intent)
+		intents = append(intents, sp)
+		return nil
+	}); err != nil {
+		panic(err)
 	}
 	return intents
 }
@@ -204,16 +194,15 @@ func NewTxnMetrics(txnRegistry *metric.Registry) *TxnMetrics {
 // transaction. When the transaction is committed or aborted, it
 // clears accumulated write intents for the transaction.
 type TxnCoordSender struct {
-	wrapped           client.Sender
-	clock             *hlc.Clock
-	heartbeatInterval time.Duration
-	clientTimeout     time.Duration
-	sync.Mutex                                   // protects txns and txnStats
-	txns              map[uuid.UUID]*txnMetadata // txn key to metadata
-	linearizable      bool                       // enables linearizable behaviour
-	tracer            opentracing.Tracer
-	stopper           *stop.Stopper
-	metrics           *TxnMetrics
+	wrapped       client.Sender
+	clock         *hlc.Clock
+	clientTimeout time.Duration
+	sync.Mutex                               // protects txns and txnStats
+	txns          map[uuid.UUID]*txnMetadata // txn key to metadata
+	linearizable  bool                       // enables linearizable behaviour
+	tracer        opentracing.Tracer
+	stopper       *stop.Stopper
+	metrics       *TxnMetrics
 }
 
 var _ client.Sender = &TxnCoordSender{}
@@ -225,15 +214,14 @@ func NewTxnCoordSender(wrapped client.Sender, clock *hlc.Clock, linearizable boo
 		panic("nil tracer supplied")
 	}
 	tc := &TxnCoordSender{
-		wrapped:           wrapped,
-		clock:             clock,
-		heartbeatInterval: storage.DefaultHeartbeatInterval,
-		clientTimeout:     defaultClientTimeout,
-		txns:              map[uuid.UUID]*txnMetadata{},
-		linearizable:      linearizable,
-		tracer:            tracer,
-		stopper:           stopper,
-		metrics:           txnMetrics,
+		wrapped:       wrapped,
+		clock:         clock,
+		clientTimeout: defaultClientTimeout,
+		txns:          map[uuid.UUID]*txnMetadata{},
+		linearizable:  linearizable,
+		tracer:        tracer,
+		stopper:       stopper,
+		metrics:       txnMetrics,
 	}
 
 	tc.stopper.RunWorker(tc.startStats)
@@ -353,15 +341,6 @@ func (tc *TxnCoordSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*r
 			}
 		}
 
-		// Set the timestamp to the original timestamp for read-only
-		// commands and to the transaction timestamp for read/write
-		// commands.
-		if ba.IsReadOnly() {
-			ba.Timestamp = ba.Txn.OrigTimestamp
-		} else {
-			ba.Timestamp = ba.Txn.Timestamp
-		}
-
 		if rArgs, ok := ba.GetArg(roachpb.EndTransaction); ok {
 			et := rArgs.(*roachpb.EndTransactionRequest)
 			if len(et.Key) != 0 {
@@ -379,21 +358,25 @@ func (tc *TxnCoordSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*r
 			}
 			tc.Lock()
 			txnMeta, metaOK := tc.txns[txnID]
-			if metaOK {
-				et.IntentSpans = txnMeta.intentSpans()
+			{
+				// Populate et.IntentSpans, taking into account both existing
+				// writes (if any) and new writes in this batch, and taking
+				// care to perform proper deduplication.
+				var keys interval.RangeGroup
+				if metaOK {
+					keys = txnMeta.keys
+				} else {
+					keys = interval.NewRangeTree()
+				}
+				ba.IntentSpanIterate(func(key, endKey roachpb.Key) {
+					addKeyRange(keys, key, endKey)
+				})
+				et.IntentSpans = collectIntentSpans(keys)
 			}
 			tc.Unlock()
 
-			if intentSpans := ba.GetIntentSpans(); len(intentSpans) > 0 {
-				// Writes in Batch, so EndTransaction is fine. Should add
-				// outstanding intents to EndTransaction, though.
-				// TODO(tschottdorf): possible issues when the batch fails,
-				// but the intents have been added anyways.
-				// TODO(tschottdorf): some of these intents may be covered
-				// by others, for example {[a,b), a}). This can lead to
-				// some extra requests when those are non-local to the txn
-				// record. But it doesn't seem worth optimizing now.
-				et.IntentSpans = append(et.IntentSpans, intentSpans...)
+			if len(et.IntentSpans) > 0 {
+				// All good, proceed.
 			} else if !metaOK {
 				// If we don't have the transaction, then this must be a retry
 				// by the client. We can no longer reconstruct a correct
@@ -510,6 +493,7 @@ func (tc *TxnCoordSender) maybeBeginTxn(ba *roachpb.BatchRequest) error {
 			}
 			haveBeginTxn = true
 			ba.Txn.Key = bt.Key
+			ba.HeartbeatInterval = bt.HeartbeatInterval
 		}
 		if roachpb.IsTransactionWrite(args) && !haveBeginTxn && !ba.Txn.Writing {
 			return util.Errorf("transactional write before begin transaction")
@@ -563,10 +547,10 @@ func (tc *TxnCoordSender) unregisterTxnLocked(txnID uuid.UUID) (duration, restar
 // committed after attempting to resolve the intents. When the
 // heartbeat stops, the transaction is unregistered from the
 // coordinator,
-func (tc *TxnCoordSender) heartbeatLoop(txnID uuid.UUID) {
+func (tc *TxnCoordSender) heartbeatLoop(txnID uuid.UUID, heartbeatInterval time.Duration) {
 	var tickChan <-chan time.Time
 	{
-		ticker := time.NewTicker(tc.heartbeatInterval)
+		ticker := time.NewTicker(heartbeatInterval)
 		tickChan = ticker.C
 		defer ticker.Stop()
 	}
@@ -631,7 +615,7 @@ func (tc *TxnCoordSender) heartbeat(txnID uuid.UUID, trace opentracing.Span, ctx
 		}
 		proceed = false
 		// Grab the intents here to avoid potential race.
-		intentSpans = txnMeta.intentSpans()
+		intentSpans = collectIntentSpans(txnMeta.keys)
 		txnMeta.keys.Clear()
 	}
 	// txnMeta.txn is possibly replaced concurrently,
@@ -640,7 +624,6 @@ func (tc *TxnCoordSender) heartbeat(txnID uuid.UUID, trace opentracing.Span, ctx
 	tc.Unlock()
 
 	ba := roachpb.BatchRequest{}
-	ba.Timestamp = tc.clock.Now()
 	ba.Txn = &txn
 
 	if !proceed {
@@ -668,7 +651,9 @@ func (tc *TxnCoordSender) heartbeat(txnID uuid.UUID, trace opentracing.Span, ctx
 		return false
 	}
 
-	hb := &roachpb.HeartbeatTxnRequest{}
+	hb := &roachpb.HeartbeatTxnRequest{
+		Now: tc.clock.Now(),
+	}
 	hb.Key = txn.Key
 	ba.Add(hb)
 
@@ -718,12 +703,6 @@ func (tc *TxnCoordSender) updateState(ctx context.Context, ba roachpb.BatchReque
 	}
 
 	switch t := pErr.GetDetail().(type) {
-	case nil:
-		// Move txn timestamp forward to response timestamp if applicable.
-		// TODO(tschottdorf): see (*Replica).executeBatch and comments within.
-		// Looks like this isn't necessary any more, nor did it prevent a bug
-		// referenced in a TODO there.
-		newTxn.Timestamp.Forward(br.Timestamp)
 	case *roachpb.TransactionStatusError:
 		// Likely already committed or more obscure errors such as epoch or
 		// timestamp regressions; consider txn dead.
@@ -755,6 +734,8 @@ func (tc *TxnCoordSender) updateState(ctx context.Context, ba roachpb.BatchReque
 		newTxn.Restart(ba.UserPriority, t.PusheeTxn.Priority-1, newTxn.Timestamp)
 	case *roachpb.TransactionRetryError:
 		newTxn.Restart(ba.UserPriority, pErr.GetTxn().Priority, newTxn.Timestamp)
+	case nil:
+		// Nothing to do here, avoid the default case.
 	default:
 		if pErr.GetTxn() != nil {
 			if pErr.CanRetry() {
@@ -796,7 +777,14 @@ func (tc *TxnCoordSender) updateState(ctx context.Context, ba roachpb.BatchReque
 	// unless it is tracking it (on top of it making sense to track it;
 	// after all, it **has** laid down intents and only the coordinator
 	// can augment a potential EndTransaction call). See #3303.
-	intents := ba.GetIntentSpans()
+	var intents []roachpb.Span
+	// TODO(nvanbenschoten): Iterating here to put the intents in a slice for
+	// the sole purpose of later iterating again and calling addKeyRange is a
+	// little wasteful and can likely be avoided.
+	ba.IntentSpanIterate(func(key, endKey roachpb.Key) {
+		intents = append(intents, roachpb.Span{Key: key, EndKey: endKey})
+	})
+
 	if len(intents) > 0 && (pErr == nil || newTxn.Writing) {
 		if txnMeta == nil {
 			if !newTxn.Writing {
@@ -812,7 +800,7 @@ func (tc *TxnCoordSender) updateState(ctx context.Context, ba roachpb.BatchReque
 				sp.LogEvent("coordinator spawns")
 				txnMeta = &txnMetadata{
 					txn:              *newTxn,
-					keys:             cache.NewIntervalCache(cache.Config{Policy: cache.CacheNone}),
+					keys:             interval.NewRangeTree(),
 					firstUpdateNanos: tc.clock.PhysicalNow(),
 					lastUpdateNanos:  tc.clock.PhysicalNow(),
 					timeoutDuration:  tc.clientTimeout,
@@ -820,8 +808,13 @@ func (tc *TxnCoordSender) updateState(ctx context.Context, ba roachpb.BatchReque
 				}
 				tc.txns[txnID] = txnMeta
 
+				heartbeatInterval := storage.DefaultHeartbeatInterval
+				if ba.HeartbeatInterval != nil && *ba.HeartbeatInterval > 0 {
+					heartbeatInterval = time.Duration(*ba.HeartbeatInterval)
+				}
+
 				if !tc.stopper.RunAsyncTask(func() {
-					tc.heartbeatLoop(txnID)
+					tc.heartbeatLoop(txnID, heartbeatInterval)
 				}) {
 					// The system is already draining and we can't start the
 					// heartbeat. We refuse new transactions for now because
@@ -844,7 +837,7 @@ func (tc *TxnCoordSender) updateState(ctx context.Context, ba roachpb.BatchReque
 		// intents blocking concurrent writers for extended periods of time.
 		// See #3346.
 		for _, intent := range intents {
-			txnMeta.addKeyRange(intent.Key, intent.EndKey)
+			addKeyRange(txnMeta.keys, intent.Key, intent.EndKey)
 		}
 	}
 	if pErr == nil {
@@ -869,6 +862,7 @@ func (tc *TxnCoordSender) resendWithTxn(ba roachpb.BatchRequest) (*roachpb.Batch
 	pErr := tmpDB.Txn(func(txn *client.Txn) *roachpb.Error {
 		txn.SetDebugName("auto-wrap", 0)
 		b := txn.NewBatch()
+		b.MaxScanResults = ba.MaxScanResults
 		for _, arg := range ba.Requests {
 			req := arg.GetInner()
 			b.InternalAddRequest(req)

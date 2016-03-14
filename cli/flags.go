@@ -22,19 +22,19 @@ import (
 	"net"
 	"strings"
 
-	"github.com/dustin/go-humanize"
 	"github.com/kr/text"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/cockroachdb/cockroach/base"
 	"github.com/cockroachdb/cockroach/security"
+	"github.com/cockroachdb/cockroach/util"
 )
 
 var maxResults int64
 
 var connURL string
-var connUser, connHost, connPort, connDBName string
+var connUser, connHost, connPort, httpPort, connDBName string
 
 // cliContext is the CLI Context used for the command-line client.
 var cliContext = NewContext()
@@ -59,27 +59,24 @@ nodes. For example:`) + `
 Total size in bytes for caches, shared evenly if there are multiple
 storage devices. Size suffixes are supported (e.g. 1GB and 1GiB).`),
 
-	"certs": wrapText(`
-Directory containing RSA key and x509 certs. This flag is required if
---insecure=false.`),
-
 	"client_host": wrapText(`
 Database server host to connect to.`),
 
 	"client_port": wrapText(`
 Database server port to connect to.`),
 
+	"client_http_port": wrapText(`
+Database server port to connect to for HTTP requests.`),
+
 	"database": wrapText(`
 The name of the database to connect to.`),
 
 	"execute": wrapText(`
-Execute the SQL statement(s) on the command line, then exit. Each
-subsequent positional argument on the command line may contain
-one or more SQL statements, separated by semicolons. If an
-error occurs in any statement, the command exits with a
-non-zero status code and further statements are not
-executed. The results of each SQL statement are printed on
-the standard output.`),
+Execute the SQL statement(s) on the command line, then exit. This flag may be
+specified multiple times and each value may contain multiple semicolon
+separated statements. If an error occurs in any statement, the command exits
+with a non-zero status code and further statements are not executed. The
+results of each SQL statement are printed on the standard output.`),
 
 	"join": wrapText(`
 A comma-separated list of addresses to use when a new node is joining
@@ -103,23 +100,8 @@ Run over plain HTTP. WARNING: this is strongly discouraged.`),
 	"key-size": wrapText(`
 Key size in bits for CA/Node/Client certificates.`),
 
-	"linearizable": wrapText(`
-Enables linearizable behaviour of operations on this node by making
-sure that no commit timestamp is reported back to the client until all
-other node clocks have necessarily passed it.`),
-
-	"max-offset": wrapText(`
-The maximum clock offset for the cluster. Clock offset is measured on
-all node-to-node links and if any node notices it has clock offset in
-excess of --max-offset, it will commit suicide. Setting this value too
-high may decrease transaction performance in the presence of
-contention.`),
-
 	"max-results": wrapText(`
 Define the maximum number of results that will be retrieved.`),
-
-	"metrics-frequency": wrapText(`
-Adjust the frequency at which the server records its own internal metrics.`),
 
 	"password": wrapText(`
 The created user's password. If provided, disables prompting. Pass '-' to
@@ -128,14 +110,20 @@ provide the password on standard input.`),
 	"server_port": wrapText(`
 The port to bind to.`),
 
-	"scan-interval": wrapText(`
-Adjusts the target for the duration of a single scan through a store's
-ranges. The scan is slowed as necessary to approximately achieve this
-duration.`),
+	"server_http_port": wrapText(`
+The port to bind to for HTTP requests.`),
 
-	"scan-max-idle-time": wrapText(`
-Adjusts the max idle time of the scanner. This speeds up the scanner on small
-clusters to be more responsive.`),
+	"ca-cert": wrapText(`
+Path to the CA certificate. Needed by clients and servers in secure mode.`),
+
+	"ca-key": wrapText(`
+Path to the key protecting --ca-cert. Only needed when signing new certificates.`),
+
+	"cert": wrapText(`
+Path to the client or server certificate. Needed in secure mode.`),
+
+	"key": wrapText(`
+Path to the key protecting --cert. Needed in secure mode.`),
 
 	"store": wrapText(`
 The file path to a storage device. This flag must be specified separately for
@@ -208,16 +196,16 @@ const usageIndentation = 8
 const wrapWidth = 79 - usageIndentation
 
 type bytesValue struct {
-	val   *uint64
+	val   *int64
 	isSet bool
 }
 
-func newBytesValue(val *uint64) *bytesValue {
+func newBytesValue(val *int64) *bytesValue {
 	return &bytesValue{val: val}
 }
 
 func (b *bytesValue) Set(s string) error {
-	v, err := humanize.ParseBytes(s)
+	v, err := util.ParseBytes(s)
 	if err != nil {
 		return err
 	}
@@ -234,7 +222,7 @@ func (b *bytesValue) String() string {
 	// This uses the MiB, GiB, etc suffixes. If we use humanize.Bytes() we get
 	// the MB, GB, etc suffixes, but the conversion is done in multiples of 1000
 	// vs 1024.
-	return humanize.IBytes(*b.val)
+	return util.IBytes(*b.val)
 }
 
 func wrapText(s string) string {
@@ -281,27 +269,23 @@ func initFlags(ctx *Context) {
 		// Server flags.
 		f.StringVar(&connHost, "host", "", usage("server_host"))
 		f.StringVarP(&connPort, "port", "p", base.DefaultPort, usage("server_port"))
+		f.StringVar(&httpPort, "http-port", base.DefaultHTTPPort, usage("server_http_port"))
 		f.StringVar(&ctx.Attrs, "attrs", ctx.Attrs, usage("attrs"))
 		f.VarP(&ctx.Stores, "store", "s", usage("store"))
-		f.DurationVar(&ctx.MaxOffset, "max-offset", ctx.MaxOffset, usage("max-offset"))
-		f.DurationVar(&ctx.MetricsFrequency, "metrics-frequency", ctx.MetricsFrequency, usage("metrics-frequency"))
 
 		// Security flags.
-		f.StringVar(&ctx.Certs, "certs", ctx.Certs, usage("certs"))
 		f.BoolVar(&ctx.Insecure, "insecure", ctx.Insecure, usage("insecure"))
+		// Certificates.
+		f.StringVar(&ctx.SSLCA, "ca-cert", ctx.SSLCA, usage("ca-cert"))
+		f.StringVar(&ctx.SSLCert, "cert", ctx.SSLCert, usage("cert"))
+		f.StringVar(&ctx.SSLCertKey, "key", ctx.SSLCertKey, usage("key"))
 
 		// Cluster joining flags.
 		f.StringVar(&ctx.JoinUsing, "join", ctx.JoinUsing, usage("join"))
 
-		// KV flags.
-		f.BoolVar(&ctx.Linearizable, "linearizable", ctx.Linearizable, usage("linearizable"))
-
 		// Engine flags.
 		cacheSize = newBytesValue(&ctx.CacheSize)
 		f.Var(cacheSize, "cache", usage("cache"))
-		f.DurationVar(&ctx.ScanInterval, "scan-interval", ctx.ScanInterval, usage("scan-interval"))
-		f.DurationVar(&ctx.ScanMaxIdleTime, "scan-max-idle-time", ctx.ScanMaxIdleTime, usage("scan-max-idle-time"))
-		f.DurationVar(&ctx.TimeUntilStoreDead, "time-until-store-dead", ctx.TimeUntilStoreDead, usage("time-until-store-dead"))
 
 		// Clear the cache default value. This flag does have a default, but
 		// it is set only when the "start" command is run.
@@ -322,11 +306,12 @@ func initFlags(ctx *Context) {
 
 	for _, cmd := range certCmds {
 		f := cmd.Flags()
-		f.StringVar(&ctx.Certs, "certs", ctx.Certs, usage("certs"))
+		// Certificate flags.
+		f.StringVar(&ctx.SSLCA, "ca-cert", ctx.SSLCA, usage("ca-cert"))
+		f.StringVar(&ctx.SSLCAKey, "ca-key", ctx.SSLCAKey, usage("ca-key"))
+		f.StringVar(&ctx.SSLCert, "cert", ctx.SSLCert, usage("cert"))
+		f.StringVar(&ctx.SSLCertKey, "key", ctx.SSLCertKey, usage("key"))
 		f.IntVar(&keySize, "key-size", defaultKeySize, usage("key-size"))
-		if err := cmd.MarkFlagRequired("certs"); err != nil {
-			panic(err)
-		}
 		if err := cmd.MarkFlagRequired("key-size"); err != nil {
 			panic(err)
 		}
@@ -336,30 +321,46 @@ func initFlags(ctx *Context) {
 
 	clientCmds := []*cobra.Command{
 		sqlShellCmd, kvCmd, rangeCmd,
-		userCmd, zoneCmd, nodeCmd,
 		exterminateCmd, quitCmd, /* startCmd is covered above */
 	}
+	clientCmds = append(clientCmds, userCmds...)
+	clientCmds = append(clientCmds, zoneCmds...)
+	clientCmds = append(clientCmds, nodeCmds...)
 	for _, cmd := range clientCmds {
 		f := cmd.PersistentFlags()
 		f.BoolVar(&ctx.Insecure, "insecure", ctx.Insecure, usage("insecure"))
-		f.StringVar(&ctx.Certs, "certs", ctx.Certs, usage("certs"))
 		f.StringVar(&connHost, "host", "", usage("client_host"))
+
+		// Certificate flags.
+		f.StringVar(&ctx.SSLCA, "ca-cert", ctx.SSLCA, usage("ca-cert"))
+		f.StringVar(&ctx.SSLCert, "cert", ctx.SSLCert, usage("cert"))
+		f.StringVar(&ctx.SSLCertKey, "key", ctx.SSLCertKey, usage("key"))
 	}
 
 	{
 		f := sqlShellCmd.Flags()
-		f.BoolVarP(&ctx.OneShotSQL, "execute", "e", ctx.OneShotSQL, usage("execute"))
+		f.VarP(&ctx.execStmts, "execute", "e", usage("execute"))
 	}
 
 	// Commands that need the cockroach port.
-	simpleCmds := []*cobra.Command{kvCmd, nodeCmd, rangeCmd, exterminateCmd, quitCmd}
+	simpleCmds := []*cobra.Command{kvCmd, rangeCmd, exterminateCmd}
 	for _, cmd := range simpleCmds {
 		f := cmd.PersistentFlags()
 		f.StringVarP(&connPort, "port", "p", base.DefaultPort, usage("client_port"))
 	}
 
+	// Commands that need an http port.
+	httpCmds := []*cobra.Command{quitCmd}
+	httpCmds = append(httpCmds, nodeCmds...)
+	for _, cmd := range httpCmds {
+		f := cmd.PersistentFlags()
+		f.StringVar(&httpPort, "http-port", base.DefaultHTTPPort, usage("client_http_port"))
+	}
+
 	// Commands that establish a SQL connection.
-	sqlCmds := []*cobra.Command{sqlShellCmd, userCmd, zoneCmd}
+	sqlCmds := []*cobra.Command{sqlShellCmd}
+	sqlCmds = append(sqlCmds, zoneCmds...)
+	sqlCmds = append(sqlCmds, userCmds...)
 	for _, cmd := range sqlCmds {
 		f := cmd.PersistentFlags()
 		f.StringVar(&connURL, "url", "", usage("url"))
@@ -381,5 +382,6 @@ func init() {
 
 	cobra.OnInitialize(func() {
 		cliContext.Addr = net.JoinHostPort(connHost, connPort)
+		cliContext.HTTPAddr = net.JoinHostPort(connHost, httpPort)
 	})
 }

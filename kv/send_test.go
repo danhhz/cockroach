@@ -19,7 +19,6 @@ package kv
 import (
 	"errors"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -50,18 +49,7 @@ func newNodeTestContext(clock *hlc.Clock, stopper *stop.Stopper) *rpc.Context {
 func newTestServer(t *testing.T, ctx *rpc.Context) (*grpc.Server, net.Listener) {
 	s := rpc.NewServer(ctx)
 
-	tlsConfig, err := ctx.GetServerTLSConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// We may be called in a loop, meaning tlsConfig is may be in used by a
-	// running server during a call to `util.ListenAndServe`, which may
-	// mutate it (due to http2.ConfigureServer). Make a copy to avoid trouble.
-	tlsConfigCopy := *tlsConfig
-
-	addr := util.CreateTestAddr("tcp")
-	ln, err := util.ListenAndServe(ctx.Stopper, s, addr, &tlsConfigCopy)
+	ln, err := util.ListenAndServeGRPC(ctx.Stopper, s, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +120,6 @@ func TestRetryableError(t *testing.T) {
 	clientStopper := stop.NewStopper()
 	defer clientStopper.Stop()
 	clientContext := newNodeTestContext(nil, clientStopper)
-	clientContext.HeartbeatTimeout = 10 * clientContext.HeartbeatInterval
 
 	serverStopper := stop.NewStopper()
 	serverContext := newNodeTestContext(nil, serverStopper)
@@ -145,25 +132,23 @@ func TestRetryableError(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	// Wait until the client becomes healthy and shut down the server.
-	for clientState, err := conn.State(); clientState != grpc.Ready; clientState, err = conn.WaitForStateChange(ctx, clientState) {
-		if err != nil {
-			t.Fatal(err)
-		}
-		if clientState == grpc.Shutdown {
-			t.Fatalf("%v has unexpectedly shut down", conn)
+	waitForConnState := func(desiredState grpc.ConnectivityState) {
+		clientState, err := conn.State()
+		for clientState != desiredState {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if clientState == grpc.Shutdown {
+				t.Fatalf("%v has unexpectedly shut down", conn)
+			}
+			clientState, err = conn.WaitForStateChange(ctx, clientState)
 		}
 	}
+	// Wait until the client becomes healthy and shut down the server.
+	waitForConnState(grpc.Ready)
 	serverStopper.Stop()
 	// Wait until the client becomes unhealthy.
-	for clientState, err := conn.State(); clientState != grpc.TransientFailure; clientState, err = conn.WaitForStateChange(ctx, clientState) {
-		if err != nil {
-			t.Fatal(err)
-		}
-		if clientState == grpc.Shutdown {
-			t.Fatalf("%v has unexpectedly shut down", conn)
-		}
-	}
+	waitForConnState(grpc.TransientFailure)
 
 	sp := tracing.NewTracer().StartSpan("node test")
 	defer sp.Finish()
@@ -238,11 +223,13 @@ func TestClientNotReady(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 
-	nodeContext := newNodeTestContext(nil, stopper)
-
-	// Construct a server that listens but doesn't do anything.
-	s, ln := newTestServer(t, nodeContext)
-	roachpb.RegisterInternalServer(s, Node(50*time.Millisecond))
+	// Construct a server that listens but doesn't do anything. Notice that we
+	// never start accepting connections on the listener.
+	ln, err := net.Listen(util.TestAddr.Network(), util.TestAddr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
 
 	sp := tracing.NewTracer().StartSpan("node test")
 	defer sp.Finish()
@@ -255,6 +242,7 @@ func TestClientNotReady(t *testing.T) {
 	}
 
 	// Send RPC to an address where no server is running.
+	nodeContext := newNodeTestContext(nil, stopper)
 	if _, err := sendBatch(opts, []net.Addr{ln.Addr()}, nodeContext); err != nil {
 		retryErr, ok := err.(retry.Retryable)
 		if !ok {
@@ -267,23 +255,38 @@ func TestClientNotReady(t *testing.T) {
 		t.Fatalf("Unexpected success")
 	}
 
-	// Send the RPC again with no timeout.
+	// Send the RPC again with no timeout. We create a new node context to ensure
+	// there is a new connection.
+	nodeContext = newNodeTestContext(nil, stopper)
 	opts.SendNextTimeout = 0
 	opts.Timeout = 0
 	c := make(chan error)
+	sent := make(chan struct{})
+
+	// Start a goroutine to accept the connection from the client. We'll close
+	// the sent channel after receiving the connection, thus ensuring that the
+	// RPC was sent before we closed the connection. We intentionally do not
+	// close the server connection as doing so triggers other gRPC code paths.
 	go func() {
-		if _, err := sendBatch(opts, []net.Addr{ln.Addr()}, nodeContext); err == nil {
-			c <- util.Errorf("expected error when client is closed")
-		} else if !strings.Contains(err.Error(), "failed as client connection was closed") {
+		_, err := ln.Accept()
+		if err != nil {
 			c <- err
+		} else {
+			close(sent)
+		}
+	}()
+	go func() {
+		_, err := sendBatch(opts, []net.Addr{ln.Addr()}, nodeContext)
+		if !testutils.IsError(err, "failed as client connection was closed") {
+			c <- util.Errorf("unexpected error: %v", err)
 		}
 		close(c)
 	}()
 
 	select {
-	case <-c:
-		t.Fatalf("Unexpected end of rpc call")
-	case <-time.After(1 * time.Millisecond):
+	case err := <-c:
+		t.Fatalf("Unexpected end of rpc call: %v", err)
+	case <-sent:
 	}
 
 	// Grab the client for our invalid address and close it. This will cause the

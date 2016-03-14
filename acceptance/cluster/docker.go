@@ -31,7 +31,7 @@ import (
 
 	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/container"
-	"github.com/docker/engine-api/types/network"
+	"github.com/docker/go-connections/nat"
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/util/log"
@@ -51,7 +51,7 @@ func dockerIP() net.IP {
 		return net.ParseIP(h)
 	}
 	if runtime.GOOS == "linux" {
-		return net.IPv4zero
+		return net.IPv4(127, 0, 0, 1)
 	}
 	panic("unable to determine docker ip address")
 }
@@ -85,6 +85,7 @@ func pullImage(l *LocalCluster, options types.ImagePullOptions) error {
 		var message interface{}
 		if err := dec.Decode(&message); err != nil {
 			if err == io.EOF {
+				_, _ = fmt.Fprintln(os.Stderr)
 				return nil
 			}
 			return err
@@ -98,11 +99,17 @@ func pullImage(l *LocalCluster, options types.ImagePullOptions) error {
 	}
 }
 
-// createContainer creates a new container using the specified options. Per the
-// docker API, the created container is not running and must be started
-// explicitly.
-func createContainer(l *LocalCluster, containerConfig container.Config, hostConfig container.HostConfig, networkConfig *network.NetworkingConfig, containerName string) (*Container, error) {
-	resp, err := l.client.ContainerCreate(&containerConfig, &hostConfig, networkConfig, containerName)
+// createContainer creates a new container using the specified
+// options. Per the docker API, the created container is not running
+// and must be started explicitly. Note that the passed-in hostConfig
+// will be augmented with the necessary settings to use the network
+// defined by l.createNetwork().
+func createContainer(l *LocalCluster, containerConfig container.Config, hostConfig container.HostConfig, containerName string) (*Container, error) {
+	hostConfig.NetworkMode = container.NetworkMode(l.networkID)
+	// Disable DNS search under the host machine's domain. This can
+	// catch upstream wildcard DNS matching and result in odd behavior.
+	hostConfig.DNSSearch = []string{"."}
+	resp, err := l.client.ContainerCreate(&containerConfig, &hostConfig, nil, containerName)
 	if err != nil {
 		return nil, err
 	}
@@ -243,21 +250,23 @@ func (c *Container) Inspect() (types.ContainerJSON, error) {
 }
 
 // Addr returns the TCP address to connect to.
-func (c *Container) Addr() *net.TCPAddr {
+func (c *Container) Addr(port nat.Port) *net.TCPAddr {
 	containerInfo, err := c.Inspect()
 	if err != nil {
+		log.Error(err)
 		return nil
 	}
-	bindings, ok := containerInfo.NetworkSettings.Ports[defaultTCP]
+	bindings, ok := containerInfo.NetworkSettings.Ports[port]
 	if !ok || len(bindings) == 0 {
 		return nil
 	}
-	port, err := strconv.Atoi(bindings[0].HostPort)
+	portNum, err := strconv.Atoi(bindings[0].HostPort)
 	if err != nil {
+		log.Error(err)
 		return nil
 	}
 	return &net.TCPAddr{
 		IP:   dockerIP(),
-		Port: port,
+		Port: portNum,
 	}
 }

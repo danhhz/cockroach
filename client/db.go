@@ -19,7 +19,6 @@ package client
 import (
 	"bytes"
 	"fmt"
-	"time"
 
 	"golang.org/x/net/context"
 
@@ -35,7 +34,7 @@ import (
 // nil.
 type KeyValue struct {
 	Key   roachpb.Key
-	Value *roachpb.Value
+	Value *roachpb.Value // Timestamp will always be zero
 }
 
 func (kv *KeyValue) String() string {
@@ -79,20 +78,6 @@ func (kv *KeyValue) PrettyValue() string {
 		return fmt.Sprintf("%s", v)
 	}
 	return fmt.Sprintf("%q", kv.Value.RawBytes)
-}
-
-func (kv *KeyValue) setTimestamp(t roachpb.Timestamp) {
-	if kv.Value != nil {
-		kv.Value.Timestamp = t
-	}
-}
-
-// Timestamp returns the timestamp the value was written at.
-func (kv *KeyValue) Timestamp() time.Time {
-	if kv.Value == nil {
-		return time.Time{}
-	}
-	return kv.Value.Timestamp.GoTime()
 }
 
 // ValueBytes returns the value as a byte slice. This method will panic if the
@@ -337,16 +322,25 @@ func (db *DB) AdminSplit(splitKey interface{}) *roachpb.Error {
 	return pErr
 }
 
+// CheckConsistency runs a consistency check on all the ranges containing
+// the key span.
+func (db *DB) CheckConsistency(begin, end interface{}) *roachpb.Error {
+	b := db.NewBatch()
+	b.CheckConsistency(begin, end)
+	_, pErr := runOneResult(db, b)
+	return pErr
+}
+
 // sendAndFill is a helper which sends the given batch and fills its results,
 // returning the appropriate error which is either from the first failing call,
 // or an "internal" error.
-func sendAndFill(send func(...roachpb.Request) (*roachpb.BatchResponse, *roachpb.Error), b *Batch) (*roachpb.BatchResponse, *roachpb.Error) {
+func sendAndFill(send func(int64, ...roachpb.Request) (*roachpb.BatchResponse, *roachpb.Error), b *Batch) (*roachpb.BatchResponse, *roachpb.Error) {
 	// Errors here will be attached to the results, so we will get them from
 	// the call to fillResults in the regular case in which an individual call
 	// fails. But send() also returns its own errors, so there's some dancing
 	// here to do because we want to run fillResults() so that the individual
 	// result gets initialized with an error from the corresponding call.
-	br, pErr := send(b.reqs...)
+	br, pErr := send(b.MaxScanResults, b.reqs...)
 	if pErr != nil {
 		// Discard errors from fillResults.
 		_ = b.fillResults(nil, pErr)
@@ -402,7 +396,8 @@ func (db *DB) Txn(retryable func(txn *Txn) *roachpb.Error) *roachpb.Error {
 
 // send runs the specified calls synchronously in a single batch and returns
 // any errors. Returns a nil response for empty input (no requests).
-func (db *DB) send(reqs ...roachpb.Request) (*roachpb.BatchResponse, *roachpb.Error) {
+func (db *DB) send(maxScanResults int64, reqs ...roachpb.Request) (
+	*roachpb.BatchResponse, *roachpb.Error) {
 	if len(reqs) == 0 {
 		return nil, nil
 	}
@@ -410,7 +405,8 @@ func (db *DB) send(reqs ...roachpb.Request) (*roachpb.BatchResponse, *roachpb.Er
 	ba := roachpb.BatchRequest{}
 	ba.Add(reqs...)
 
-	if ba.UserPriority == 0 && db.userPriority != 1 {
+	ba.MaxScanResults = maxScanResults
+	if db.userPriority != 1 {
 		ba.UserPriority = db.userPriority
 	}
 

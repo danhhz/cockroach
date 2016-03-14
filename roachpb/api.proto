@@ -183,9 +183,25 @@ message ReverseScanResponse {
   repeated KeyValue rows = 2 [(gogoproto.nullable) = false];
 }
 
+// A CheckConsistencyRequest is the argument to the CheckConsistency() method.
+// It specifies the start and end keys for a span of ranges to which a consistency
+// check should be applied. A consistency check on a range involves running a
+// ComputeChecksum on the range followed by a VerifyChecksum.
+message CheckConsistencyRequest {
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+// A CheckConsistencyResponse is the return value from the CheckConsistency() method.
+// If a replica finds itself to be inconsistent with its leader it will panic.
+message CheckConsistencyResponse {
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
 // A BeginTransactionRequest is the argument to the BeginTransaction() method.
 message BeginTransactionRequest {
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  // How often to heartbeat in ns.
+  optional int64 heartbeat_interval = 2;
 }
 
 // A BeginTransactionResponse is the return value from the BeginTransaction() method.
@@ -318,6 +334,7 @@ message RangeLookupResponse {
 // gossip protocol.
 message HeartbeatTxnRequest {
   optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  optional Timestamp now = 2 [(gogoproto.nullable) = false];
 }
 
 // A HeartbeatTxnResponse is the return value from the HeartbeatTxn()
@@ -517,6 +534,46 @@ message LeaderLeaseResponse{
   optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 }
 
+// A ComputeChecksumRequest is arguments to the ComputeChecksum() method, to
+// start computing the checksum for the specified range at the snapshot for
+// this request command. A response is returned without the checksum.
+// The computed checksum is later compared to the one supplied
+// through a VerifyChecksumRequest.
+message ComputeChecksumRequest {
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  // The version used to pick the checksum method. It allows us to use a
+  // consistent checksumming method across replicas.
+  optional uint32 version = 2 [(gogoproto.nullable) = false];
+  // A unique identifier to match a future VerifyChecksumRequest with this request.
+  optional bytes checksum_id = 3 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "ChecksumID",
+      (gogoproto.customtype) = "github.com/cockroachdb/cockroach/util/uuid.UUID"];
+} 
+
+// A ComputeChecksumResponse is the response to a ComputeChecksum() operation.
+message ComputeChecksumResponse {
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+// A VerifyChecksumRequest is arguments to the VerifyChecksum() method, to
+// verify the checksum computed on the leader against the one requested
+// earlier through a ComputeChecksumRequest with the same checksum_id.
+message VerifyChecksumRequest {
+  optional Span header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  // The version used to pick the checksum method. It allows us to use a
+  // consistent checksumming method across replicas.
+  optional uint32 version = 2 [(gogoproto.nullable) = false];
+  optional bytes checksum_id = 3 [(gogoproto.nullable) = false,
+      (gogoproto.customname) = "ChecksumID",
+      (gogoproto.customtype) = "github.com/cockroachdb/cockroach/util/uuid.UUID"];
+  optional bytes checksum = 4;
+} 
+
+// A VerifyChecksumResponse is the response to a VerifyChecksum() operation.
+message VerifyChecksumResponse {
+  optional ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
 // A RequestUnion contains exactly one of the optional requests.
 // The values added here must match those in ResponseUnion.
 message RequestUnion {
@@ -543,7 +600,10 @@ message RequestUnion {
   optional TruncateLogRequest truncate_log = 19;
   optional LeaderLeaseRequest leader_lease = 20;
   optional ReverseScanRequest reverse_scan = 21;
-  optional NoopRequest noop = 22;
+  optional ComputeChecksumRequest compute_checksum = 22;
+  optional VerifyChecksumRequest verify_checksum = 23;
+  optional CheckConsistencyRequest check_consistency = 24;
+  optional NoopRequest noop = 25;
 }
 
 // A ResponseUnion contains exactly one of the optional responses.
@@ -572,7 +632,10 @@ message ResponseUnion {
   optional TruncateLogResponse truncate_log = 19;
   optional LeaderLeaseResponse leader_lease = 20;
   optional ReverseScanResponse reverse_scan = 21;
-  optional NoopResponse noop = 22;
+  optional ComputeChecksumResponse compute_checksum = 22;
+  optional VerifyChecksumResponse verify_checksum = 23;
+  optional CheckConsistencyResponse check_consistency = 24;
+  optional NoopResponse noop = 25;
 }
 
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
@@ -606,12 +669,17 @@ message Header {
   // fully-initialized transaction with txn ID, priority, initial
   // timestamp, and maximum timestamp.
   optional Transaction txn = 5;
+  // How often to heartbeat in ns.
+  optional int64 heartbeat_interval = 9;
   // read_consistency specifies the consistency for read
   // operations. The default is CONSISTENT. This value is ignored for
   // write operations.
   optional ReadConsistencyType read_consistency = 6 [(gogoproto.nullable) = false];
   // trace, if set, is the active span of an OpenTracing distributed trace.
   optional util.tracing.Span trace = 7;
+  // if set to a non-zero value, limits the total number of results for
+  // Scan/ReverseScan requests in the batch.
+  optional int64 max_scan_results = 8 [(gogoproto.nullable) = false];
 }
 
 
@@ -635,14 +703,6 @@ message BatchResponse {
   message Header {
     // error is non-nil if an error occurred.
     optional Error error = 1;
-    // timestamp specifies time at which read or write actually was
-    // performed. In the case of both reads and writes, if the timestamp
-    // supplied to the request was 0, the wall time of the node
-    // servicing the request will be set here. Additionally, in the case
-    // of writes, this value may be increased from the timestamp passed
-    // with the Span if the key being written was either read
-    // or written more recently.
-    optional Timestamp timestamp = 2 [(gogoproto.nullable) = false];
     // txn is non-nil if the request specified a non-nil
     // transaction. The transaction timestamp and/or priority may have
     // been updated, depending on the outcome of the request.
