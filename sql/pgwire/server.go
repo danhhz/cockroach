@@ -90,6 +90,8 @@ func Match(rd io.Reader) bool {
 // and delegating to the appropriate connection type.
 func (s *Server) ServeConn(conn net.Conn) error {
 	s.metrics.conns.Inc(1)
+	log.Info("OPENED a pgwire ServeConn")
+	defer log.Info("CLOSED a pgwire ServeConn")
 	defer s.metrics.conns.Dec(1)
 
 	var buf readBuffer

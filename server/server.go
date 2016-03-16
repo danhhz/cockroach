@@ -158,6 +158,7 @@ func NewServer(ctx *Context, stopper *stop.Stopper) (*Server, error) {
 	s.leaseMgr.RefreshLeases(s.stopper, s.db, s.gossip)
 	eCtx := sql.ExecutorContext{
 		DB:            s.db,
+		TxnPinger:     sender,
 		Gossip:        s.gossip,
 		LeaseManager:  s.leaseMgr,
 		Clock:         s.clock,

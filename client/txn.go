@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cockroachdb/cockroach/util/uuid"
+
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/roachpb"
@@ -94,6 +96,10 @@ func (ts *txnSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*roachp
 		ts.Proto.Update(pErr.GetTxn())
 	}
 	return nil, pErr
+}
+
+type TxnPinger interface {
+	TxnPing(txnID uuid.UUID)
 }
 
 // Txn is an in-progress distributed database transaction. A Txn is not safe for

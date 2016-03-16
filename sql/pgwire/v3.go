@@ -23,6 +23,9 @@ import (
 	"net"
 	"reflect"
 	"strconv"
+	"time"
+
+	"github.com/cockroachdb/cockroach/storage"
 
 	"github.com/cockroachdb/cockroach/sql"
 	"github.com/cockroachdb/cockroach/sql/parser"
@@ -157,6 +160,25 @@ func (c *v3Conn) parseOptions(data []byte) error {
 }
 
 func (c *v3Conn) serve(authenticationHook func(string, bool) error) error {
+	var tickChan <-chan time.Time
+	{
+		ticker := time.NewTicker(storage.DefaultHeartbeatInterval / 2)
+		tickChan = ticker.C
+		defer ticker.Stop()
+	}
+	go func() {
+		for _ = range tickChan {
+			log.Info("TICK from the txn ping")
+			txn := c.session.Txn.Txn
+			if txn != nil && txn.ID != nil {
+				log.Infof("PINGING txn %s\n", *txn.ID)
+				// We're in a PENDING txn.
+				c.executor.TxnPing(*txn.ID)
+			}
+		}
+		log.Info("CLOSING a txn ping tick")
+	}()
+
 	if authenticationHook != nil {
 		if err := authenticationHook(c.opts.user, true /* public */); err != nil {
 			return c.sendError(err.Error())

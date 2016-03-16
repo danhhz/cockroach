@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/util/uuid"
+
 	"gopkg.in/inf.v0"
 
 	"github.com/cockroachdb/cockroach/client"
@@ -174,6 +176,7 @@ type Executor struct {
 // a Executor; the rest will have sane defaults set if omitted.
 type ExecutorContext struct {
 	DB           *client.DB
+	TxnPinger    client.TxnPinger
 	Gossip       *gossip.Gossip
 	LeaseManager *LeaseManager
 	Clock        *hlc.Clock
@@ -228,6 +231,10 @@ func NewExecutor(ctx ExecutorContext, stopper *stop.Stopper, registry *metric.Re
 	})
 
 	return exec
+}
+
+func (e *Executor) TxnPing(txnID uuid.UUID) {
+	e.ctx.TxnPinger.TxnPing(txnID)
 }
 
 // SetNodeID sets the node ID for the SQL server. This method must be called
