@@ -130,6 +130,7 @@ func (tm *txnMetadata) getLastUpdate() int64 {
 // timeout.
 func (tm *txnMetadata) hasClientAbandonedCoord(nowNanos int64) bool {
 	timeout := nowNanos - tm.timeoutDuration.Nanoseconds()
+	log.Infof("hasClientAbandonedCoord comparing %d to %d\n", tm.getLastUpdate(), timeout)
 	return tm.getLastUpdate() < timeout
 }
 
@@ -548,6 +549,17 @@ func (tc *TxnCoordSender) unregisterTxnLocked(txnID uuid.UUID) (duration, restar
 	delete(tc.txns, txnID)
 
 	return
+}
+
+func (tc *TxnCoordSender) TxnPing(txnID uuid.UUID) {
+	txnMeta := tc.txns[txnID]
+	if txnMeta != nil {
+		tc.Lock()
+		nowNanos := tc.clock.PhysicalNow()
+		txnMeta.setLastUpdate(nowNanos)
+		tc.Unlock()
+		log.Infof("TxnPing set last update to %d\n", nowNanos)
+	}
 }
 
 // heartbeatLoop periodically sends a HeartbeatTxn RPC to an extant
