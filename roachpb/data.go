@@ -35,6 +35,7 @@ import (
 	"gopkg.in/inf.v0"
 
 	"github.com/cockroachdb/cockroach/util"
+	"github.com/cockroachdb/cockroach/util/duration"
 	"github.com/cockroachdb/cockroach/util/encoding"
 	"github.com/cockroachdb/cockroach/util/uuid"
 )
@@ -436,6 +437,22 @@ func (v *Value) SetTime(t time.Time) {
 	v.setTag(ValueType_TIME)
 }
 
+// SetDuration encodes the specified duration value into the bytes field of the
+// receiver, sets the tag and clears the checksum.
+func (v *Value) SetDuration(t duration.Duration) error {
+	const encodingSizeOverestimate = 1 + 3*binary.MaxVarintLen64
+	var err error
+	v.RawBytes = make([]byte, headerSize, headerSize+encodingSizeOverestimate)
+	// TODO(dan): roachpb.Value doesn't have to sort in the same way the encoded
+	// keys do. Consider doing something more efficient than this.
+	v.RawBytes, err = encoding.EncodeDurationAscending(v.RawBytes, t)
+	if err != nil {
+		return err
+	}
+	v.setTag(ValueType_DURATION)
+	return nil
+}
+
 // SetDecimal encodes the specified decimal value into the bytes field of
 // the receiver using Gob encoding, sets the tag and clears the checksum.
 func (v *Value) SetDecimal(dec *inf.Dec) error {
@@ -510,6 +527,16 @@ func (v Value) GetTime() (time.Time, error) {
 		return time.Time{}, fmt.Errorf("value type is not %s: %s", ValueType_TIME, tag)
 	}
 	_, t, err := encoding.DecodeTimeAscending(v.dataBytes())
+	return t, err
+}
+
+// GetDuration decodes a duration value from the bytes field of the receiver. If
+// the tag is not DURATION an error will be returned.
+func (v Value) GetDuration() (duration.Duration, error) {
+	if tag := v.GetTag(); tag != ValueType_DURATION {
+		return duration.Duration{}, fmt.Errorf("value type is not %s: %s", ValueType_DURATION, tag)
+	}
+	_, t, err := encoding.DecodeDurationAscending(v.dataBytes())
 	return t, err
 }
 
@@ -744,6 +771,7 @@ func (t *Transaction) Restart(userPriority UserPriority, upgradePriority int32, 
 	// - the conflicting transaction's upgradePriority
 	t.UpgradePriority(MakePriority(userPriority))
 	t.UpgradePriority(upgradePriority)
+	t.WriteTooOld = false
 }
 
 // Update ratchets priority, timestamp and original timestamp values (among
@@ -784,6 +812,13 @@ func (t *Transaction) Update(o *Transaction) {
 	// We can't assert against regression here since it can actually happen
 	// that we update from a transaction which isn't Writing.
 	t.Writing = t.Writing || o.Writing
+	// This isn't or'd (similar to Writing) because we want WriteTooOld
+	// to be set each time according to "o". This allows a persisted
+	// txn to have its WriteTooOld flag reset on update.
+	// TODO(tschottdorf): reset in a central location when it's certifiably
+	//   a new request. Update is called in many situations and shouldn't
+	//   reset anything.
+	t.WriteTooOld = o.WriteTooOld
 	if t.Sequence < o.Sequence {
 		t.Sequence = o.Sequence
 	}
@@ -808,8 +843,8 @@ func (t Transaction) String() string {
 	if len(t.Name) > 0 {
 		fmt.Fprintf(&buf, "%q ", t.Name)
 	}
-	fmt.Fprintf(&buf, "id=%s key=%s rw=%t pri=%.8f iso=%s stat=%s epo=%d ts=%s orig=%s max=%s",
-		t.Short(), t.Key, t.Writing, floatPri, t.Isolation, t.Status, t.Epoch, t.Timestamp, t.OrigTimestamp, t.MaxTimestamp)
+	fmt.Fprintf(&buf, "id=%s key=%s rw=%t pri=%.8f iso=%s stat=%s epo=%d ts=%s orig=%s max=%s wto=%t",
+		t.Short(), t.Key, t.Writing, floatPri, t.Isolation, t.Status, t.Epoch, t.Timestamp, t.OrigTimestamp, t.MaxTimestamp, t.WriteTooOld)
 	return buf.String()
 }
 
@@ -885,6 +920,18 @@ func AsIntents(spans []Span, txn *Transaction) []Intent {
 // Equal compares for equality.
 func (s Span) Equal(o Span) bool {
 	return s.Key.Equal(o.Key) && s.EndKey.Equal(o.EndKey)
+}
+
+// Overlaps returns whether the two spans overlap.
+func (s Span) Overlaps(o Span) bool {
+	if len(s.EndKey) == 0 && len(o.EndKey) == 0 {
+		return s.Key.Equal(o.Key)
+	} else if len(s.EndKey) == 0 {
+		return bytes.Compare(s.Key, o.Key) >= 0 && bytes.Compare(s.Key, o.EndKey) < 0
+	} else if len(o.EndKey) == 0 {
+		return bytes.Compare(o.Key, s.Key) >= 0 && bytes.Compare(o.Key, s.EndKey) < 0
+	}
+	return bytes.Compare(s.EndKey, o.Key) > 0 && bytes.Compare(s.Key, o.EndKey) < 0
 }
 
 // RSpan is a key range with an inclusive start RKey and an exclusive end RKey.

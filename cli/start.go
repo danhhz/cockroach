@@ -146,6 +146,12 @@ func runStart(_ *cobra.Command, _ []string) error {
 
 	log.Info("starting cockroach node")
 	s, err := server.NewServer(&cliContext.Context, stopper)
+
+	// We don't do this in NewServer since we don't want it in tests.
+	if err := s.SetupReportingURLs(); err != nil {
+		return err
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to start Cockroach server: %s", err)
 	}
@@ -163,6 +169,9 @@ func runStart(_ *cobra.Command, _ []string) error {
 	fmt.Fprintf(tw, "build:\t%s @ %s (%s)\n", info.Tag, info.Time, info.Vers)
 	fmt.Fprintf(tw, "admin:\t%s\n", cliContext.AdminURL())
 	fmt.Fprintf(tw, "sql:\t%s\n", pgURL)
+	if len(cliContext.SocketFile) != 0 {
+		fmt.Fprintf(tw, "socket:\t%s\n", cliContext.SocketFile)
+	}
 	fmt.Fprintf(tw, "logs:\t%s\n", flag.Lookup("log-dir").Value)
 	for i, spec := range cliContext.Stores.Specs {
 		fmt.Fprintf(tw, "store[%d]:\t%s\n", i, spec)

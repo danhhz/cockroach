@@ -98,17 +98,17 @@ module Models {
       return m.request<GetUIDataResponse>({
         url: `/_admin/v1/uidata?key=${key}`,
         config: Utils.Http.XHRConfig,
+        background: true,
       });
     }
 
-    export function setUIData(key: string, value: string): MithrilPromise<any> {
+    export function setUIData(keyValues: {[key: string]: string}): MithrilPromise<any> {
       return m.request<UnparsedClusterEvents>({
         url: `/_admin/v1/uidata`,
         config: Utils.Http.XHRConfig,
         method: "POST",
         data: {
-          key: key,
-          value: value,
+          key_values: keyValues,
         },
       });
     }

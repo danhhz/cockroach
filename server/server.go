@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -83,6 +84,8 @@ type Server struct {
 	sqlExecutor         *sql.Executor
 	leaseMgr            *sql.LeaseManager
 	schemaChangeManager *sql.SchemaChangeManager
+	parsedUpdatesURL    *url.URL
+	parsedReportingURL  *url.URL
 }
 
 // NewServer creates a Server from a server.Context.
@@ -295,6 +298,29 @@ func (s *Server) Start() error {
 		}))
 	})
 
+	if len(s.ctx.SocketFile) != 0 {
+		// Unix socket enabled: postgres protocol only.
+		unixLn, err := net.Listen("unix", s.ctx.SocketFile)
+		if err != nil {
+			return err
+		}
+
+		s.stopper.RunWorker(func() {
+			<-s.stopper.ShouldDrain()
+			if err := unixLn.Close(); err != nil {
+				log.Fatal(err)
+			}
+		})
+
+		s.stopper.RunWorker(func() {
+			util.FatalIfUnexpected(serveConn(unixLn, func(conn net.Conn) {
+				if err := s.pgServer.ServeConn(conn); err != nil && !util.IsClosedConnection(err) {
+					log.Error(err)
+				}
+			}))
+		})
+	}
+
 	s.gossip.Start(s.grpc, unresolvedAddr)
 
 	// Register admin service
@@ -324,8 +350,13 @@ func (s *Server) Start() error {
 	s.schemaChangeManager = sql.NewSchemaChangeManager(*s.db, s.gossip, s.leaseMgr)
 	s.schemaChangeManager.Start(s.stopper)
 
+	s.periodicallyCheckForUpdates()
+
 	log.Infof("starting %s server at %s", s.ctx.HTTPRequestScheme(), unresolvedHTTPAddr)
 	log.Infof("starting grpc/postgres server at %s", unresolvedAddr)
+	if len(s.ctx.SocketFile) != 0 {
+		log.Infof("starting postgres server at unix:%s", s.ctx.SocketFile)
+	}
 
 	s.stopper.RunWorker(func() {
 		util.FatalIfUnexpected(m.Serve())

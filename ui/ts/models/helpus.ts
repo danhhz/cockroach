@@ -19,14 +19,13 @@ module Models {
     export const UPDATES: string = "updates";
     export const LASTUPDATED: string = "lastUpdated";
 
-    // Currently the help us flow isn't shown unless the query attribute help-us=true in the URL
+    // Help Us flow is shown by default
     export function helpUsFlag(): boolean {
-      let helpUs: string = m.route.param("help-us");
-      return (helpUs && helpUs.toString().toLowerCase() === "true");
+      return true;
     }
 
     /**
-     * OptInAttributes tracks the values we get from the SYSTEM.REPORTING table
+     * OptInAttributes tracks the values we get from the system.ui table
      */
     export class OptInAttributes {
       email: string = "";
@@ -54,7 +53,7 @@ module Models {
     }
 
     function setHelpUsData(attrs: OptInAttributes): MithrilPromise<any> {
-      return Models.API.setUIData("helpus", btoa(JSON.stringify(attrs)));
+      return Models.API.setUIData({"helpus": btoa(JSON.stringify(attrs))});
     }
 
     export class UserOptIn {
@@ -89,7 +88,10 @@ module Models {
         // Make sure we loaded the data first
         // TODO: check timestamp on the backend to prevent overwriting data without loading first
         if (this.loaded) {
-          return setHelpUsData(this.attributes);
+          return setHelpUsData(this.attributes)
+          .then(() => {
+            this.savedAttributes = _.clone(this.attributes);
+          });
         }
       }
 

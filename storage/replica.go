@@ -95,31 +95,53 @@ const (
 	DefaultLeaderLeaseDuration = time.Second
 )
 
-// tsCacheMethods specifies the set of methods which affect the
-// timestamp cache. This syntax creates a sparse array with maximum
-// index equal to the value of the final Method. Unused indexes
-// default to false.
-var tsCacheMethods = [...]bool{
-	roachpb.Get:                true,
-	roachpb.Put:                true,
-	roachpb.ConditionalPut:     true,
-	roachpb.Increment:          true,
-	roachpb.Scan:               true,
-	roachpb.ReverseScan:        true,
-	roachpb.Delete:             true,
-	roachpb.DeleteRange:        true,
-	roachpb.ResolveIntent:      true,
-	roachpb.ResolveIntentRange: true,
+// consultsTimestampCacheMethods specifies the set of methods which
+// consult the timestamp cache. This syntax creates a sparse array
+// with maximum index equal to the value of the final Method. Unused
+// indexes default to false.
+var consultsTimestampCacheMethods = [...]bool{
+	roachpb.Put:              true,
+	roachpb.ConditionalPut:   true,
+	roachpb.Increment:        true,
+	roachpb.Delete:           true,
+	roachpb.DeleteRange:      true,
+	roachpb.BeginTransaction: true,
 }
 
-// usesTimestampCache returns true if the request affects or is
-// affected by the timestamp cache.
-func usesTimestampCache(r roachpb.Request) bool {
+func consultsTimestampCache(r roachpb.Request) bool {
 	m := r.Method()
-	if m < 0 || m >= roachpb.Method(len(tsCacheMethods)) {
+	if m < 0 || m >= roachpb.Method(len(consultsTimestampCacheMethods)) {
 		return false
 	}
-	return tsCacheMethods[m]
+	return consultsTimestampCacheMethods[m]
+}
+
+// updatesTimestampCacheMethods specifies the set of methods which if
+// successful will update the timestamp cache.
+var updatesTimestampCacheMethods = [...]bool{
+	roachpb.Get: true,
+	// ConditionalPut effectively reads and may not write, so must
+	// update the timestamp cache.
+	roachpb.ConditionalPut: true,
+	// DeleteRange updates the write timestamp cache as it doesn't leave
+	// intents or tombstones for keys which don't yet exist. By updating
+	// the write timestamp cache, it forces subsequent writes to get a
+	// write-too-old error and avoids the phantom delete anomaly.
+	roachpb.DeleteRange: true,
+	roachpb.Scan:        true,
+	roachpb.ReverseScan: true,
+	// EndTransaction updates the write timestamp cache to prevent
+	// replays. Replays for the same transaction key and timestamp will
+	// have Txn.WriteTooOld=true and must retry on EndTransaction.
+	roachpb.EndTransaction: true,
+}
+
+func updatesTimestampCache(r roachpb.Request) bool {
+	m := r.Method()
+	if m < 0 || m >= roachpb.Method(len(updatesTimestampCacheMethods)) {
+		return false
+	}
+	return updatesTimestampCacheMethods[m]
 }
 
 // A pendingCmd holds a done channel for a command sent to Raft. Once
@@ -158,26 +180,42 @@ type Replica struct {
 
 	// Held in read mode during read-only commands. Held in exclusive mode to
 	// prevent read-only commands from executing. Acquired before the embedded
-	// RWMutex
+	// RWMutex.
 	readOnlyCmdMu sync.RWMutex
 
 	mu struct {
-		sync.Mutex                   // Protects all fields in the mu struct.
-		appliedIndex   uint64        // Last index applied to the state machine.
-		cmdQ           *CommandQueue // Enforce at most one command is running per key(s).
-		desc           *roachpb.RangeDescriptor
-		lastIndex      uint64 // Last index persisted to the raft log (not necessarily committed).
-		leaderLease    *roachpb.Lease
-		maxBytes       int64 // Max bytes before split.
+		// Protects all fields in the mu struct.
+		sync.Mutex
+		// Last index applied to the state machine.
+		appliedIndex uint64
+		// Enforces at most one command is running per key(s).
+		cmdQ *CommandQueue
+		// Range descriptor.
+		//
+		// The lock protects the pointer but the RangeDescriptor struct itself
+		// should be treated as immutable; a reference to it can be returned to
+		// a caller via Replica.Desc() and then used outside of the lock.
+		//
+		// Changes of the descriptor should normally go through one of the
+		// Replica.setDesc* methods.
+		desc *roachpb.RangeDescriptor
+		// Last index persisted to the raft log (not necessarily committed).
+		lastIndex   uint64
+		leaderLease *roachpb.Lease
+		// Max bytes before split.
+		maxBytes       int64
 		pendingCmds    map[storagebase.CmdIDKey]*pendingCmd
 		raftGroup      *raft.RawNode
 		replicaID      roachpb.ReplicaID
 		truncatedState *roachpb.RaftTruncatedState
-		tsCache        *TimestampCache       // Most recent timestamps for keys / key ranges
-		llChans        []chan *roachpb.Error // Slice of channels to send on after leader lease acquisition
+		// Most recent timestamps for keys / key ranges.
+		tsCache *TimestampCache
+		// Slice of channels to send on after leader lease acquisition.
+		llChans []chan *roachpb.Error
 		// proposeRaftCommandFn can be set to mock out the propose operation.
 		proposeRaftCommandFn func(*pendingCmd) error
-		checksums            map[uuid.UUID]replicaChecksum // computed checksum at a snapshot UUID.
+		// Computed checksum at a snapshot UUID.
+		checksums map[uuid.UUID]replicaChecksum
 	}
 }
 
@@ -719,12 +757,10 @@ func (r *Replica) Send(ctx context.Context, ba roachpb.BatchRequest) (*roachpb.B
 		// clients will retry.
 		pErr = roachpb.NewError(roachpb.NewRangeNotFoundError(r.RangeID))
 	}
-	// TODO(tschottdorf): assert nil reply on error.
 	if pErr != nil {
 		log.Trace(ctx, fmt.Sprintf("error: %s", pErr))
-		return nil, pErr
 	}
-	return br, nil
+	return br, pErr
 }
 
 // TODO(tschottdorf): almost obsolete.
@@ -764,7 +800,7 @@ func (r *Replica) checkBatchRequest(ba roachpb.BatchRequest) error {
 // key ranges. This method will block if there are any overlapping commands
 // already in the queue. Returns a cleanup function to be called when the
 // commands are done and can be removed from the queue.
-func (r *Replica) beginCmds(ba *roachpb.BatchRequest) func(*roachpb.Error) {
+func (r *Replica) beginCmds(ba *roachpb.BatchRequest) func(*roachpb.BatchResponse, *roachpb.Error) {
 	var cmdKeys []interface{}
 	// Don't use the command queue for inconsistent reads.
 	if ba.ReadConsistency != roachpb.INCONSISTENT {
@@ -786,41 +822,115 @@ func (r *Replica) beginCmds(ba *roachpb.BatchRequest) func(*roachpb.Error) {
 	// preceding command(s) for key range are complete so that the node
 	// clock has been updated to the high water mark of any commands
 	// which might overlap this one in effect.
+	// TODO(spencer,tschottdorf): might remove this, but harder than it looks.
+	//   This isn't just unittests (which would require revamping the test
+	//   context sender), but also some of the scanner queues place batches
+	//   directly into the local range they're servicing.
 	if ba.Timestamp.Equal(roachpb.ZeroTimestamp) {
 		if ba.Txn != nil {
 			// TODO(tschottdorf): see if this is already done somewhere else.
-			ba.Timestamp = ba.Txn.Timestamp
+			ba.Timestamp = ba.Txn.OrigTimestamp
 		} else {
 			ba.Timestamp = r.store.Clock().Now()
 		}
 	}
 
-	return func(pErr *roachpb.Error) {
-		r.endCmds(cmdKeys, ba, pErr)
+	return func(br *roachpb.BatchResponse, pErr *roachpb.Error) {
+		r.endCmds(cmdKeys, ba, br, pErr)
 	}
 }
 
 // endCmds removes pending commands from the command queue and updates
 // the timestamp cache using the final timestamp of each command.
-func (r *Replica) endCmds(cmdKeys []interface{}, ba *roachpb.BatchRequest, pErr *roachpb.Error) {
+func (r *Replica) endCmds(cmdKeys []interface{}, ba *roachpb.BatchRequest, br *roachpb.BatchResponse, pErr *roachpb.Error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Only update the timestamp cache if the command succeeded and we're not
-	// doing inconsistent ops (in which case the ops are always read-only).
+	// Only update the timestamp cache if the command succeeded and is
+	// marked as affecting the cache. Inconsistent reads are excluded.
 	if pErr == nil && ba.ReadConsistency != roachpb.INCONSISTENT {
+		timestamp := ba.Timestamp
 		for _, union := range ba.Requests {
 			args := union.GetInner()
-			if usesTimestampCache(args) {
-				header := args.Header()
-				var txnID *uuid.UUID
-				if ba.Txn != nil {
-					txnID = ba.Txn.ID
+			if updatesTimestampCache(args) {
+				readTSCache := true
+				key := args.Header().Key
+				txnID := ba.GetTxnID()
+				switch args.(type) {
+				case *roachpb.DeleteRangeRequest:
+					// DeleteRange adds to the write timestamp cache to prevent
+					// subsequent writes from rewriting history.
+					readTSCache = false
+				case *roachpb.EndTransactionRequest:
+					// EndTransaction adds to the write timestamp cache to ensure
+					// replays create a transaction record with WriteTooOld set.
+					// We set txnID=nil because we want hits for same txn ID.
+					key = keys.TransactionKey(key, txnID)
+					txnID = nil
+					readTSCache = false
 				}
-				r.mu.tsCache.Add(header.Key, header.EndKey, ba.Timestamp, txnID, roachpb.IsReadOnly(args))
+				header := args.Header()
+				r.mu.tsCache.Add(key, header.EndKey, timestamp, txnID, readTSCache)
 			}
 		}
 	}
 	r.mu.cmdQ.Remove(cmdKeys)
+}
+
+// applyTimestampCache moves the batch timestamp forward depending on
+// the presence of overlapping entries in the timestamp cache. If the
+// batch is transactional, the txn timestamp and the txn.WriteTooOld
+// bool are updated.
+//
+// Two important invariants of Cockroach: 1) encountering a more
+// recently written value means transaction restart. 2) values must
+// be written with a greater timestamp than the most recent read to
+// the same key. Check the timestamp cache for reads/writes which
+// are at least as recent as the timestamp of this write. The cmd must
+// update its timestamp to be greater than more recent values in the
+// timestamp cache. When the write returns, the updated timestamp
+// will inform the batch response timestamp or batch response txn
+// timestamp.
+//
+// TODO(tschottdorf): find a way not to update the batch txn
+//   which should be immutable.
+func (r *Replica) applyTimestampCache(ba *roachpb.BatchRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, union := range ba.Requests {
+		args := union.GetInner()
+		if consultsTimestampCache(args) {
+			header := args.Header()
+			key := header.Key
+			// On BeginTransaction, we consult the transaction key.  We
+			// leave write timestamp cache entries on EndTransaction, Which
+			// prevents replays.
+			if _, ok := args.(*roachpb.BeginTransactionRequest); ok {
+				key = keys.TransactionKey(key, ba.GetTxnID())
+			}
+
+			// Forward the timestamp if there's been a more recent read.
+			rTS := r.mu.tsCache.GetMaxRead(key, header.EndKey, ba.GetTxnID())
+			if ba.Txn != nil {
+				ba.Txn.Timestamp.Forward(rTS.Next())
+			} else {
+				ba.Timestamp.Forward(rTS.Next())
+			}
+
+			// On more recent writes, forward the timestamp and set the
+			// write too old boolean for transactions. Note that currently
+			// only EndTransaction and DeleteRange requests update the
+			// write timestamp cache.
+			wTS := r.mu.tsCache.GetMaxWrite(key, header.EndKey, ba.GetTxnID())
+			if ba.Txn != nil {
+				if !wTS.Less(ba.Txn.Timestamp) {
+					ba.Txn.Timestamp.Forward(wTS.Next())
+					ba.Txn.WriteTooOld = true
+				}
+			} else {
+				ba.Timestamp.Forward(wTS.Next())
+			}
+		}
+	}
 }
 
 // addAdminCmd executes the command directly. There is no interaction
@@ -899,7 +1009,7 @@ func (r *Replica) addReadOnlyCmd(ctx context.Context, ba roachpb.BatchRequest) (
 	// timestamp cache update is synchronized. This is wrapped to delay
 	// pErr evaluation to its value when returning.
 	defer func() {
-		endCmdsFunc(pErr)
+		endCmdsFunc(br, pErr)
 	}()
 
 	// Execute read-only batch command. It checks for matching key range; note
@@ -949,7 +1059,7 @@ func (r *Replica) addWriteCmd(ctx context.Context, ba roachpb.BatchRequest, wg *
 	// Guarantee we remove the commands from the command queue. This is
 	// wrapped to delay pErr evaluation to its value when returning.
 	defer func() {
-		endCmdsFunc(pErr)
+		endCmdsFunc(br, pErr)
 	}()
 
 	// This replica must have leader lease to process a write.
@@ -957,49 +1067,11 @@ func (r *Replica) addWriteCmd(ctx context.Context, ba roachpb.BatchRequest, wg *
 		return nil, pErr
 	}
 
-	// Two important invariants of Cockroach: 1) encountering a more
-	// recently written value means transaction restart. 2) values must
-	// be written with a greater timestamp than the most recent read to
-	// the same key. Check the timestamp cache for reads/writes which
-	// are at least as recent as the timestamp of this write. For
-	// writes, send WriteTooOldError; for reads, update the write's
-	// timestamp. When the write returns, the updated timestamp will
-	// inform the final commit timestamp.
-	//
-	// Find the maximum timestamp required to satisfy all requests in
-	// the batch and then apply that to all requests.
-	func() {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		for _, union := range ba.Requests {
-			args := union.GetInner()
-			if usesTimestampCache(args) {
-				header := args.Header()
-				var txnID *uuid.UUID
-				if ba.Txn != nil {
-					txnID = ba.Txn.ID
-				}
-
-				// Always push the timestamp forward if there's been a read which
-				// occurred after our txn timestamp.
-				if rTS := r.mu.tsCache.GetMaxRead(header.Key, header.EndKey, txnID); !rTS.Less(ba.Timestamp) {
-					ba.Timestamp = rTS.Next()
-				}
-
-				// If we're in a txn, we still go ahead and try the write since
-				// we want to avoid restarting the transaction in the event that
-				// there isn't an intent or the intent can be pushed by us.
-				//
-				// If we're not in a txn, it's trivial to just advance our timestamp.
-				if ba.Txn == nil {
-					// If there's a newer write timestamp...
-					if wTS := r.mu.tsCache.GetMaxWrite(header.Key, header.EndKey, txnID); !wTS.Less(ba.Timestamp) {
-						ba.Timestamp = wTS.Next()
-					}
-				}
-			}
-		}
-	}()
+	// Examine the read and write timestamp caches for preceding
+	// commands which require this command to move its timestamp
+	// forward. Or, in the case of a transactional write, the txn
+	// timestamp and possible write-too-old bool.
+	r.applyTimestampCache(&ba)
 
 	log.Trace(ctx, "raft")
 
@@ -1445,8 +1517,8 @@ func (r *Replica) applyRaftCommandInBatch(
 	// anomalies when we know that the transaction has been aborted or pushed,
 	// but it itself does not.
 	if ba.Txn != nil && ba.IsTransactionWrite() {
-		if err := r.checkSequenceCache(btch, *ba.Txn); err != nil {
-			return btch, nil, nil, err
+		if pErr := r.checkSequenceCache(btch, *ba.Txn); pErr != nil {
+			return btch, nil, nil, pErr
 		}
 	}
 
@@ -1478,22 +1550,26 @@ func (r *Replica) applyRaftCommandInBatch(
 		}
 	}
 
+	// Keep track of original txn Writing state to santitize txn
+	// reported with any error except TransactionRetryError.
+	wasWriting := ba.Txn != nil && ba.Txn.Writing
+
 	// Execute the commands. If this returns without an error, the batch must
 	// be committed (EndTransaction with a CommitTrigger may unlock
 	// readOnlyCmdMu via a batch.Defer).
-	br, intents, err := r.executeBatch(ctx, idKey, btch, ms, ba)
+	br, intents, pErr := r.executeBatch(ctx, idKey, btch, ms, ba)
 
 	// Regardless of error, add result to the sequence cache if this is
 	// a write method. This must be done as part of the execution of
 	// raft commands so that every replica maintains the same responses
 	// to continue request idempotence, even if leadership changes.
 	if ba.IsWrite() {
-		if err != nil {
+		if pErr != nil {
 			// If the batch failed with a TransactionRetryError, any
 			// preceding mutations in the batch engine should still be
 			// applied so that intents are laid down in preparation for
 			// the retry.
-			if _, ok := err.GetDetail().(*roachpb.TransactionRetryError); !ok {
+			if _, ok := pErr.GetDetail().(*roachpb.TransactionRetryError); !ok {
 				// TODO(tschottdorf): make `nil` acceptable. Corresponds to
 				// roachpb.Response{With->Or}Error.
 				br = &roachpb.BatchResponse{}
@@ -1502,6 +1578,10 @@ func (r *Replica) applyRaftCommandInBatch(
 				btch.Close()
 				btch = r.store.Engine().NewBatch()
 				*ms = engine.MVCCStats{}
+				// Restore the original txn's Writing bool if pErr specifies a transaction.
+				if txn := pErr.GetTxn(); txn != nil && txn.Equal(ba.Txn) {
+					txn.Writing = wasWriting
+				}
 			}
 		}
 
@@ -1510,13 +1590,11 @@ func (r *Replica) applyRaftCommandInBatch(
 			// protection. In the particular case of a txn which just ended
 			// (via a successful EndTransaction call), it has purged its
 			// sequence cache state and would prefer if we didn't write an
-			// entry which would then need to be GCed on the slow path. See
-			// (*Replica).adjustResponseCache for a more salient explanation
-			// of why that is ok.
+			// entry which would then need to be GCed on the slow path.
 			_, isEndTxn := ba.GetArg(roachpb.EndTransaction)
-			if (!isEndTxn && ba.IsTransactionWrite()) || err != nil {
+			if (!isEndTxn && ba.IsTransactionWrite()) || pErr != nil {
 				if putErr := r.sequence.Put(btch, ms, ba.Txn.ID, ba.Txn.Epoch,
-					ba.Txn.Sequence, ba.Txn.Key, ba.Txn.Timestamp, err); putErr != nil {
+					ba.Txn.Sequence, ba.Txn.Key, ba.Txn.Timestamp, pErr); putErr != nil {
 					// TODO(tschottdorf): ReplicaCorruptionError.
 					log.Fatalc(ctx, "putting a sequence cache entry in a batch should never fail: %s", putErr)
 				}
@@ -1524,7 +1602,7 @@ func (r *Replica) applyRaftCommandInBatch(
 		}
 	}
 
-	return btch, br, intents, err
+	return btch, br, intents, pErr
 }
 
 // checkSequenceCache checks the sequence cache for the given transaction for
@@ -1533,6 +1611,9 @@ func (r *Replica) applyRaftCommandInBatch(
 // or transaction abort error is returned, respectively.
 // checkSequenceCache locks the replica.
 func (r *Replica) checkSequenceCache(b engine.Engine, txn roachpb.Transaction) *roachpb.Error {
+	if r.store.ctx.TestingKnobs.DisableSequenceCache {
+		return nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1579,28 +1660,6 @@ func (r *Replica) executeBatch(
 	*roachpb.BatchResponse, []intentsWithArg, *roachpb.Error) {
 	br := &roachpb.BatchResponse{}
 	var intents []intentsWithArg
-	// If transactional, we use ba.Txn for each individual command and
-	// accumulate updates to it.
-	isTxn := ba.Txn != nil
-
-	if ba.Requests[0].GetInner().Method() == roachpb.BeginTransaction &&
-		(len(ba.Requests) < 2 || !roachpb.IsTransactionWrite(ba.Requests[1].GetInner())) {
-		// We rely on this fact for cleaning out sequence cache entries as
-		// early as possible. See the implementation of EndTransaction for
-		// details.
-		return nil, nil, roachpb.NewError(util.Errorf("BeginTransaction must be followed by a transactional write: %s", ba))
-
-	}
-
-	// Ensure that timestamps on individual requests are offset by an incremental
-	// amount of logical ticks from the base timestamp of the batch request (if
-	// that is non-zero and the batch is not in a Txn). This has the effect of
-	// allowing self-overlapping commands within the batch, which would otherwise
-	// result in an endless loop of WriteTooOldErrors.
-	// TODO(tschottdorf): discuss self-overlap.
-	// TODO(tschottdorf): provisional feature to get back to passing tests.
-	// Have to discuss how we go about it.
-	fiddleWithTimestamps := !isTxn && ba.IsWrite()
 
 	remScanResults := int64(math.MaxInt64)
 	if ba.Header.MaxScanResults != 0 {
@@ -1609,40 +1668,10 @@ func (r *Replica) executeBatch(
 		remScanResults = ba.Header.MaxScanResults
 	}
 
-	// TODO(tschottdorf): provisionals ahead. This loop needs to execute each
-	// command and propagate txn and timestamp to the next (and, eventually,
-	// to the batch response header). We're currently in an intermediate stage
-	// in which requests still contain a header with a lot of redundant info,
-	// so the code is fairly clumsy and tries to overwrite as much as it can
-	// from the batch. There'll certainly be some more iterations to stream-
-	// line the code in this loop.
 	for index, union := range ba.Requests {
 		// Execute the command.
 		args := union.GetInner()
-
-		header := ba.Header
-
-		// TODO(tschottdorf): should be able to drop the next TODO; we don't
-		// actually push to the timestamp of the request any more.
-		// TODO(tschottdorf): currently treating PushTxn specially. Otherwise
-		// conflict resolution would break because a batch full of pushes of
-		// the same Txn for different intents will push the pushee in
-		// iteration, bumping up its priority. Unfortunately PushTxn is flagged
-		// as a write command. Interim solution.
-		// Note that being in a txn implies no fiddling.
-		// This part of the "hack" is complemented by one in the Store which
-		// moved the batch timestamp forward (len(ba.Requests)-1), so we write
-		// the commands into the logical past.
-		// For example, for a batch with three commands, the Store added two
-		// logical ticks to the original timestamp, and here we'll execute
-		// the first request without these ticks, the second with one tick,
-		// and the third with both ticks added.
-		if fiddleWithTimestamps && args.Method() != roachpb.PushTxn {
-			header.Timestamp = ba.Timestamp.Add(0, int32(1-len(ba.Requests)+index))
-		}
-
-		reply, curIntents, pErr := r.executeCmd(
-			ctx, idKey, index, batch, ms, header, remScanResults, args)
+		reply, curIntents, pErr := r.executeCmd(ctx, idKey, index, batch, ms, ba.Header, remScanResults, args)
 
 		// Collect intents skipped over the course of execution.
 		if len(curIntents) > 0 {
@@ -1651,10 +1680,60 @@ func (r *Replica) executeBatch(
 		}
 
 		if pErr != nil {
-			// Initialize the error index.
-			pErr.SetErrorIndex(int32(index))
-			return nil, intents, pErr
+			switch tErr := pErr.GetDetail().(type) {
+			case *roachpb.WriteTooOldError:
+				// WriteTooOldErrors may be the product of raft replays. If
+				// timestamp of the request matches exactly with the existing
+				// value, maybe propagate the WriteTooOldError to let client
+				// retry at a higher timestamp. Keep in mind that this replay
+				// protection is best effort only. If replays come out of
+				// order, we'd expect them to succeed as the timestamps which
+				// would match on a successive replay won't match if the replay
+				// is delivered only after another raft command has been applied
+				// to the same key.
+				if ba.Timestamp.Next().Equal(tErr.ActualTimestamp) {
+					// If in a txn, propagate WriteTooOldError immediately. In
+					// a txn, intents from earlier commands in the same batch
+					// won't return a WriteTooOldError.
+					if ba.Txn != nil {
+						return nil, intents, pErr
+					}
+					// If not in a txn, need to make sure we don't propagate the
+					// error unless there are no earlier commands in the batch
+					// which might have written the same key.
+					var overlap bool
+					if ba.Txn == nil {
+						for _, union := range ba.Requests[:index] {
+							if union.GetInner().Header().Overlaps(args.Header()) {
+								overlap = true
+								break
+							}
+						}
+					}
+					if !overlap {
+						return nil, intents, pErr
+					}
+				}
+				// On WriteTooOldError, we've written a new value or an intent
+				// at a too-high timestamp and we must forward the batch txn or
+				// timestamp as appropriate so that it's returned.
+				if ba.Txn != nil {
+					ba.Txn.Timestamp.Forward(tErr.ActualTimestamp)
+					ba.Txn.WriteTooOld = true
+				} else {
+					ba.Timestamp.Forward(tErr.ActualTimestamp)
+				}
+				// Clear the WriteTooOldError; we're done processing it by having
+				// moved the batch or txn timestamps forward and set WriteTooOld
+				// if this is a transactional write.
+				pErr = nil
+			default:
+				// Initialize the error index.
+				pErr.SetErrorIndex(int32(index))
+				return nil, intents, pErr
+			}
 		}
+
 		if remScanResults != math.MaxInt64 {
 			if cReply, ok := reply.(roachpb.Countable); ok {
 				retResults := cReply.Count()
@@ -1665,30 +1744,28 @@ func (r *Replica) executeBatch(
 			}
 		}
 
-		// Add the response to the batch, updating the timestamp.
+		// Add the response to the batch, updating the txn if applicable
+		// (e.g. on EndTransaction).
 		br.Add(reply)
-		if isTxn {
+		// If transactional, we use ba.Txn for each individual command and
+		// accumulate updates to it.
+		// TODO(spencer,tschottdorf): need copy-on-write behavior for the
+		//   updated batch transaction / timestamp.
+		if ba.Txn != nil {
 			if txn := reply.Header().Txn; txn != nil {
 				ba.Txn.Update(txn)
 			}
 		}
 	}
-	if isTxn {
+
+	if ba.Txn != nil {
 		// If transactional, send out the final transaction entry with the reply.
 		br.Txn = ba.Txn
-		br.Txn.Timestamp.Forward(ba.Timestamp)
-		// If this is the beginning of the write portion of a transaction,
-		// mark the returned transaction as Writing. It's important that
-		// we do this only at the end, since updating at the first write
-		// could "poison" the transaction on restartable errors, see #2920.
-		// TODO(tschottdorf): #4442.
-		if _, ok := ba.GetArg(roachpb.BeginTransaction); ok {
-			br.Txn.Writing = true
-		}
 	} else {
 		// When non-transactional, use the timestamp field.
 		br.Timestamp.Forward(ba.Timestamp)
 	}
+
 	return br, intents, nil
 }
 

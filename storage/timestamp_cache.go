@@ -34,6 +34,8 @@ const (
 	// than minCacheWindow will necessarily have to advance their commit
 	// timestamp.
 	MinTSCacheWindow = 10 * time.Second
+
+	defaultEvictionSizeThreshold = 512
 )
 
 // A TimestampCache maintains an interval tree FIFO cache of keys or
@@ -49,6 +51,15 @@ const (
 type TimestampCache struct {
 	rCache, wCache   *cache.IntervalCache
 	lowWater, latest roachpb.Timestamp
+
+	// evictionSizeThreshold allows old entries to stay in the TimestampCache
+	// indefinitely as long as the number of intervals in the cache doesn't
+	// exceed this value. Once the cache grows beyond it, intervals are
+	// evicted according to the time window. This threshold is intended to
+	// permit transactions to take longer than the eviction window duration
+	// if the size of the cache is not a concern, such as when a user
+	// is using an interactive SQL shell.
+	evictionSizeThreshold int
 }
 
 // A cacheValue combines the timestamp with an optional txn ID.
@@ -75,8 +86,9 @@ func makeCacheEntry(key cache.IntervalKey, value cacheValue) *cache.Entry {
 // hybrid clock.
 func NewTimestampCache(clock *hlc.Clock) *TimestampCache {
 	tc := &TimestampCache{
-		rCache: cache.NewIntervalCache(cache.Config{Policy: cache.CacheFIFO}),
-		wCache: cache.NewIntervalCache(cache.Config{Policy: cache.CacheFIFO}),
+		rCache:                cache.NewIntervalCache(cache.Config{Policy: cache.CacheFIFO}),
+		wCache:                cache.NewIntervalCache(cache.Config{Policy: cache.CacheFIFO}),
+		evictionSizeThreshold: defaultEvictionSizeThreshold,
 	}
 	tc.Clear(clock)
 	tc.rCache.Config.ShouldEvict = tc.shouldEvict
@@ -94,6 +106,12 @@ func (tc *TimestampCache) Clear(clock *hlc.Clock) {
 	tc.latest = tc.lowWater
 }
 
+// Len returns the total number of read and write intervals in the
+// TimestampCache.
+func (tc *TimestampCache) Len() int {
+	return tc.rCache.Len() + tc.wCache.Len()
+}
+
 // SetLowWater sets the cache's low water mark, which is the minimum
 // value the cache will return from calls to GetMax().
 func (tc *TimestampCache) SetLowWater(lowWater roachpb.Timestamp) {
@@ -104,9 +122,10 @@ func (tc *TimestampCache) SetLowWater(lowWater roachpb.Timestamp) {
 
 // Add the specified timestamp to the cache as covering the range of
 // keys from start to end. If end is nil, the range covers the start
-// key only. txnID is nil for no transaction. readOnly specifies
-// whether the command adding this timestamp was read-only or not.
-func (tc *TimestampCache) Add(start, end roachpb.Key, timestamp roachpb.Timestamp, txnID *uuid.UUID, readOnly bool) {
+// key only. txnID is nil for no transaction. readTSCache specifies
+// whether the command adding this timestamp should update the read
+// timestamp; false to update the write timestamp cache.
+func (tc *TimestampCache) Add(start, end roachpb.Key, timestamp roachpb.Timestamp, txnID *uuid.UUID, readTSCache bool) {
 	// This gives us a memory-efficient end key if end is empty.
 	if len(end) == 0 {
 		end = start.ShallowNext()
@@ -119,7 +138,7 @@ func (tc *TimestampCache) Add(start, end roachpb.Key, timestamp roachpb.Timestam
 	// low water mark.
 	if tc.lowWater.Less(timestamp) {
 		cache := tc.wCache
-		if readOnly {
+		if readTSCache {
 			cache = tc.rCache
 		}
 
@@ -271,13 +290,13 @@ func (tc *TimestampCache) GetMaxWrite(start, end roachpb.Key, txnID *uuid.UUID) 
 	return tc.getMax(start, end, txnID, false)
 }
 
-func (tc *TimestampCache) getMax(start, end roachpb.Key, txnID *uuid.UUID, readOnly bool) roachpb.Timestamp {
+func (tc *TimestampCache) getMax(start, end roachpb.Key, txnID *uuid.UUID, readTSCache bool) roachpb.Timestamp {
 	if len(end) == 0 {
 		end = start.ShallowNext()
 	}
 	max := tc.lowWater
 	cache := tc.wCache
-	if readOnly {
+	if readTSCache {
 		cache = tc.rCache
 	}
 	for _, o := range cache.GetOverlaps(start, end) {
@@ -321,10 +340,10 @@ func (tc *TimestampCache) MergeInto(dest *TimestampCache, clear bool) {
 		// The cache was not cleared before, so we can't just insert entries because
 		// intervals may need to be adjusted or removed to maintain the non-overlapping
 		// guarantee.
-		softMerge := func(srcCache *cache.IntervalCache, readOnly bool) {
+		softMerge := func(srcCache *cache.IntervalCache, readTSCache bool) {
 			srcCache.Do(func(k, v interface{}) {
 				key, val := *k.(*cache.IntervalKey), *v.(*cacheValue)
-				dest.Add(roachpb.Key(key.Start), roachpb.Key(key.End), val.timestamp, val.txnID, readOnly)
+				dest.Add(roachpb.Key(key.Start), roachpb.Key(key.End), val.timestamp, val.txnID, readTSCache)
 			})
 		}
 		softMerge(tc.rCache, true)
@@ -335,6 +354,9 @@ func (tc *TimestampCache) MergeInto(dest *TimestampCache, clear bool) {
 // shouldEvict returns true if the cache entry's timestamp is no
 // longer within the MinTSCacheWindow.
 func (tc *TimestampCache) shouldEvict(size int, key, value interface{}) bool {
+	if tc.Len() <= tc.evictionSizeThreshold {
+		return false
+	}
 	ce := value.(*cacheValue)
 	// In case low water mark was set higher, evict any entries
 	// which occurred before it.
