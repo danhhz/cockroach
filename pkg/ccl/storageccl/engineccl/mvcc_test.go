@@ -30,25 +30,6 @@ func TestMVCCIterateIncremental(t *testing.T) {
 	e := engine.NewInMem(roachpb.Attributes{}, 1<<20)
 	defer e.Close()
 
-	var (
-		keyMin   = roachpb.KeyMin
-		keyMax   = roachpb.KeyMax
-		testKey1 = roachpb.Key("/db1")
-		testKey2 = roachpb.Key("/db2")
-
-		testValue1 = []byte("val1")
-		testValue2 = []byte("val2")
-		testValue3 = []byte("val3")
-		testValue4 = []byte("val4")
-
-		ts0   = hlc.Timestamp{WallTime: 0, Logical: 0}
-		ts1   = hlc.Timestamp{WallTime: 1, Logical: 0}
-		ts2   = hlc.Timestamp{WallTime: 2, Logical: 0}
-		ts3   = hlc.Timestamp{WallTime: 3, Logical: 0}
-		ts4   = hlc.Timestamp{WallTime: 4, Logical: 0}
-		tsMax = hlc.Timestamp{WallTime: math.MaxInt64, Logical: 0}
-	)
-
 	makeKVT := func(key roachpb.Key, value []byte, ts hlc.Timestamp) engine.MVCCKeyValue {
 		return engine.MVCCKeyValue{Key: engine.MVCCKey{Key: key, Timestamp: ts}, Value: value}
 	}
@@ -58,7 +39,7 @@ func TestMVCCIterateIncremental(t *testing.T) {
 		expected []engine.MVCCKeyValue,
 	) {
 		t.Run("", func(t *testing.T) {
-			iter := NewMVCCIncrementalIterator(e)
+			iter := engine.NewMVCCIncrementalIterator(e.RocksDB)
 			defer iter.Close()
 			var kvs []engine.MVCCKeyValue
 			for iter.Reset(startKey, endKey, startTime, endTime); iter.Valid(); iter.Next() {
@@ -83,9 +64,9 @@ func TestMVCCIterateIncremental(t *testing.T) {
 		startKey, endKey roachpb.Key, startTime, endTime hlc.Timestamp, errString string,
 	) {
 		t.Run("", func(t *testing.T) {
-			iter := NewMVCCIncrementalIterator(e)
+			iter := engine.NewMVCCIncrementalIterator(e.RocksDB)
 			defer iter.Close()
-			for iter.Reset(keyMin, keyMax, ts0, ts3); iter.Valid(); iter.Next() {
+			for iter.Reset(startKey, endKey, startTime, endTime); iter.Valid(); iter.Next() {
 				// pass
 			}
 			if err := iter.Error(); !testutils.IsError(err, errString) {
@@ -93,6 +74,25 @@ func TestMVCCIterateIncremental(t *testing.T) {
 			}
 		})
 	}
+
+	var (
+		keyMin   = roachpb.KeyMin
+		keyMax   = roachpb.KeyMax
+		testKey1 = roachpb.Key("/db1")
+		testKey2 = roachpb.Key("/db2")
+
+		testValue1 = []byte("val1")
+		testValue2 = []byte("val2")
+		testValue3 = []byte("val3")
+		testValue4 = []byte("val4")
+
+		ts0   = hlc.Timestamp{WallTime: 0, Logical: 0}
+		ts1   = hlc.Timestamp{WallTime: 1, Logical: 0}
+		ts2   = hlc.Timestamp{WallTime: 2, Logical: 0}
+		ts3   = hlc.Timestamp{WallTime: 3, Logical: 0}
+		ts4   = hlc.Timestamp{WallTime: 4, Logical: 0}
+		tsMax = hlc.Timestamp{WallTime: math.MaxInt64, Logical: 0}
+	)
 
 	kv1_1_1 := makeKVT(testKey1, testValue1, ts1)
 	kv1_4_4 := makeKVT(testKey1, testValue4, ts4)
@@ -151,9 +151,9 @@ func TestMVCCIterateIncremental(t *testing.T) {
 	if err := engine.MVCCPut(ctx, e, nil, txn2.TxnMeta.Key, txn2.TxnMeta.Timestamp, txn2Val, &txn2); err != nil {
 		t.Fatal(err)
 	}
-	iterateExpectErr(testKey1, testKey1, ts0, tsMax, "conflicting intents")
-	iterateExpectErr(testKey2, testKey2, ts0, tsMax, "conflicting intents")
-	assertEqualKVs(keyMin, keyMax, ts0, ts4, nil)
+	iterateExpectErr(testKey1, testKey2, ts0, tsMax, "conflicting intents")
+	iterateExpectErr(testKey2, keyMax, ts0, tsMax, "conflicting intents")
+	assertEqualKVs(keyMin, keyMax, ts0, ts4, kvs(kv1_3Deleted, kv2_2_2))
 
 	intent1 := roachpb.Intent{Span: roachpb.Span{Key: testKey1}, Txn: txn1.TxnMeta, Status: roachpb.COMMITTED}
 	if err := engine.MVCCResolveWriteIntent(ctx, e, nil, intent1); err != nil {

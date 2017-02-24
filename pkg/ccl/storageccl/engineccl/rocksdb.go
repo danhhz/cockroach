@@ -14,17 +14,19 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // #cgo CPPFLAGS: -I../../../../vendor/github.com/cockroachdb/c-protobuf/internal/src
 // #cgo CPPFLAGS: -I../../../../vendor/github.com/cockroachdb/c-rocksdb/internal/include
+// #cgo CPPFLAGS: -I../../../storage/engine
 // #cgo CXXFLAGS: -std=c++11
 // #cgo !strictld,darwin LDFLAGS: -Wl,-undefined -Wl,dynamic_lookup
 // #cgo !strictld,!darwin LDFLAGS: -Wl,-unresolved-symbols=ignore-all
 // #cgo linux LDFLAGS: -lrt
 //
 // #include <stdlib.h>
-// #include "db.h"
+// #include "dbccl.h"
 import "C"
 
 // VerifyBatchRepr asserts that all keys in a BatchRepr are between the specified
@@ -73,6 +75,16 @@ func goToCKey(key engine.MVCCKey) C.DBKey {
 	}
 }
 
+func cToGoKey(key C.DBKey) engine.MVCCKey {
+	return engine.MVCCKey{
+		Key: cSliceToGoBytes(key.key),
+		Timestamp: hlc.Timestamp{
+			WallTime: int64(key.wall_time),
+			Logical:  int32(key.logical),
+		},
+	}
+}
+
 func cStringToGoString(s C.DBString) string {
 	if s.data == nil {
 		return ""
@@ -80,6 +92,13 @@ func cStringToGoString(s C.DBString) string {
 	result := C.GoStringN(s.data, s.len)
 	C.free(unsafe.Pointer(s.data))
 	return result
+}
+
+func cSliceToGoBytes(s C.DBSlice) []byte {
+	if s.data == nil {
+		return nil
+	}
+	return C.GoBytes(unsafe.Pointer(s.data), s.len)
 }
 
 func statusToError(s C.DBStatus) error {

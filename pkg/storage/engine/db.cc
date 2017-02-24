@@ -67,6 +67,10 @@ struct DBEngine {
   DBString GetUserProperties();
 };
 
+rocksdb::DB* DBEngineGetRep(DBEngine* e) {
+  return e->rep;
+}
+
 struct DBImpl : public DBEngine {
   std::unique_ptr<rocksdb::Env> memenv;
   std::unique_ptr<rocksdb::DB> rep_deleter;
@@ -2386,4 +2390,256 @@ const rocksdb::Comparator* CockroachComparator() {
 
 rocksdb::WriteBatch::Handler* GetDBBatchInserter(::rocksdb::WriteBatchBase* batch) {
   return new DBBatchInserter(batch);
+}
+
+int TimestampCompare(
+  const cockroach::util::hlc::Timestamp& t1,
+  const cockroach::util::hlc::Timestamp& t2
+) {
+  if (t1.wall_time() != t2.wall_time()) {
+    if (t1.wall_time() < t2.wall_time()) {
+      return -1;
+    }
+    return 1;
+  }
+  if (t1.logical() == t2.logical()) {
+    return 0;
+  } else if (t1.logical() < t2.logical()) {
+    return -1;
+  }
+  return 1;
+}
+
+struct DBIncIterator {
+  std::unique_ptr<rocksdb::Iterator> rep;
+  std::string end_key;
+  cockroach::util::hlc::Timestamp start_time;
+  cockroach::util::hlc::Timestamp end_time;
+
+  bool valid;
+  bool nextkey;
+  bool intenterr;
+};
+
+bool DBIncIterIntentErr(DBIncIterator* iter) {
+  return iter->intenterr;
+}
+
+DBIterState DBIncIterGetState(DBIncIterator* iter) {
+  DBIterState state;
+  // TODO(dan): This should just be iter->valid, probably.
+  state.valid = iter->valid && iter->rep->Valid();
+  state.key.key.data = NULL;
+  state.key.key.len = 0;
+  state.key.wall_time = 0;
+  state.key.logical = 0;
+  state.value.data = NULL;
+  state.value.len = 0;
+
+  if (state.valid) {
+    rocksdb::Slice key;
+    state.valid = DecodeKey(iter->rep->key(), &key,
+                            &state.key.wall_time, &state.key.logical);
+    if (state.valid) {
+      state.key.key = ToDBSlice(key);
+      state.value = ToDBSlice(iter->rep->value());
+    }
+  }
+  return state;
+}
+
+DBIncIterator* DBNewIncIter(DBEngine* db) {
+  // TODO(dan): Don't static_cast here, it's not safe.
+  // DBImpl* dbi = static_cast<DBImpl*>(db);
+  DBIncIterator* iter = new DBIncIterator;
+  rocksdb::ReadOptions opts;
+  opts.prefix_same_as_start = false;
+  opts.total_order_seek = true;
+  iter->rep.reset(db->rep->NewIterator(opts));
+  return iter;
+}
+
+void DBIncIterDestroy(DBIncIterator* iter) {
+  delete iter;
+}
+
+DBIterState DBIncIterReset(DBIncIterator* iter, DBKey start, DBKey end) {
+  iter->rep->Seek(EncodeKey(start));
+  iter->end_key = std::string(end.key.data, end.key.len);
+  // std::cout << "DBIncIterReset end key" << rocksdb::Slice(iter->end_key).ToString(true) << std::endl;
+  iter->start_time.set_wall_time(start.wall_time);
+  iter->start_time.set_logical(start.logical);
+  iter->end_time.set_wall_time(end.wall_time);
+  iter->end_time.set_logical(end.logical);
+  iter->valid = true;
+  iter->nextkey = false;
+  iter->intenterr = false;
+  return DBIncIterNext(iter);
+}
+
+DBStatus DBIncIterError(DBIncIterator* iter) {
+  return ToDBStatus(iter->rep->status());
+}
+
+// TODO(dan): Share this impl with DBIterNext.
+DBIterState DBIncIterNextKey(DBIncIterator* iter) {
+  // If we're skipping the current key versions, remember the key the
+  // iterator was pointing out.
+  std::string old_key;
+  if (iter->rep->Valid()) {
+    rocksdb::Slice key;
+    rocksdb::Slice ts;
+    if (!SplitKey(iter->rep->key(), &key, &ts)) {
+      // TODO(peter): Need to set an error on DBIterator. Currently
+      // DBIterError() returns iter->rep->status().
+      DBIterState state = { 0 };
+      state.valid = false;
+      return state;
+    }
+    old_key = key.ToString();
+  }
+
+  iter->rep->Next();
+
+  if (iter->rep->Valid()) {
+    rocksdb::Slice key;
+    rocksdb::Slice ts;
+    if (!SplitKey(iter->rep->key(), &key, &ts)) {
+      // TODO(peter): Need to set an error on DBIterator. Currently
+      // DBIterError() returns iter->rep->status().
+      DBIterState state = { 0 };
+      state.valid = false;
+      return state;
+    }
+    if (old_key == key) {
+      // We're pointed at a different version of the same key. Fall
+      // back to seeking to the next key.
+      old_key.append("\0", 1);
+      DBKey db_key;
+      db_key.key = ToDBSlice(old_key);
+      db_key.wall_time = 0;
+      db_key.logical = 0;
+      iter->rep->Seek(EncodeKey(db_key));
+    }
+  }
+
+  return DBIncIterGetState(iter);
+}
+
+DBIterState DBIncIterNext(DBIncIterator* iter) {
+  // std::cout << std::endl << "0 nextkey" << std::endl;
+  // std::cout << "  end_key " << rocksdb::Slice(iter->end_key).ToString(true) << std::endl;
+  // std::cout << "      key " << iter->rep->key().ToString(true) << std::endl;
+
+  while (true) {
+  	if (!iter->rep->Valid()) {
+  		iter->valid = false;
+  		break;
+  	}
+    // std::cout << "1 valid" << std::endl;
+    // std::cout << "      key " << iter->rep->key().ToString(true) << std::endl;
+
+  	if (iter->nextkey) {
+  		iter->nextkey = false;
+      DBIncIterNextKey(iter);
+  		continue;
+  	}
+    // std::cout << "2 nextkey" << std::endl;
+
+    DBIterState state = DBIncIterGetState(iter);
+    rocksdb::Slice key(state.key.key.data, state.key.key.len);
+    // std::cout << "3 key " << key.ToString(true) << std::endl;
+    // std::cout << "  key " << iter->rep->key().ToString(true) << std::endl;
+
+    if (std::string(state.key.key.data, state.key.key.len) >= iter->end_key) {
+  		iter->valid = false;
+      // std::cout << "4 >= end_key ALL DONE" << std::endl;
+  		break;
+  	}
+    // std::cout << "4 less than end_key" << std::endl;
+
+    cockroach::storage::engine::enginepb::MVCCMetadata meta;
+  	if (state.key.wall_time != 0 || state.key.logical != 0) {
+      meta.mutable_timestamp()->set_wall_time(state.key.wall_time);
+      meta.mutable_timestamp()->set_logical(state.key.logical);
+  	} else {
+      if (!meta.ParseFromArray(state.value.data, state.value.len)) {
+        // std::cout << "invalid meta" << std::endl;
+        iter->valid = false;
+        break;
+      }
+  	}
+  	// if metaKey.Key == nil {
+  	// 	// iter was pointed after i.endKey.
+  	// 	break
+  	// }
+
+    // std::cout << "5 txn " << meta.has_txn() << std::endl;
+
+  	if (meta.has_txn()) {
+      // std::cout << meta.timestamp().wall_time() << " " << iter->end_time.wall_time() << std::endl;
+      // std::cout << TimestampCompare(meta.timestamp(), iter->end_time) << std::endl;
+      if (TimestampCompare(meta.timestamp(), iter->end_time) < 0) {
+        // std::cout << "WriteIntentError" << std::endl;
+        iter->intenterr = true;
+  			iter->valid = false;
+  			break;
+  		}
+      // std::cout << "6 txn in future skipping entry" << std::endl;
+  		iter->rep->Next();
+  		continue;
+  	}
+    // std::cout << "6 txn is fine" << std::endl;
+
+    // std::cout << "  " << rocksdb::Slice(state.key.key.data, state.key.key.len).ToString(true) << " " << meta.timestamp().wall_time() << std::endl;
+    // std::cout << "  " << iter->start_time.wall_time() << " " << iter->end_time.wall_time() << std::endl;
+
+    if (TimestampCompare(meta.timestamp(), iter->end_time) >= 0) {
+      iter->rep->Next();
+      // std::cout << "7 end_time failed next entry" << std::endl;
+      continue;
+    }
+    // std::cout << "7 end_time fine" << std::endl;
+    if (TimestampCompare(meta.timestamp(), iter->start_time) < 0) {
+      // std::cout << "8 start_time failed next key" << std::endl;
+  		DBIncIterNextKey(iter);
+  		continue;
+  	}
+    // std::cout << "8 start_time fine" << std::endl;
+
+  	iter->nextkey = true;
+  	break;
+  }
+
+  return DBIncIterGetState(iter);
+}
+
+DBStatus DBIncIterToSst(DBIncIterator* iter, DBSlice path, int64_t* entries, int64_t* data_size) {
+  DBSstFileWriter* sst = DBSstFileWriterNew();
+  DBStatus status = DBSstFileWriterOpen(sst, path);
+  if (status.data != NULL) {
+    DBSstFileWriterClose(sst);
+    return status;
+  }
+
+  *entries = 0;
+  *data_size = 0;
+  DBIterState state = DBIncIterGetState(iter);
+  while (state.valid) {
+    status = DBSstFileWriterAdd(sst, state.key, state.value);
+    if (status.data != NULL) {
+      DBSstFileWriterClose(sst);
+      return status;
+    }
+    (*entries)++;
+    // TODO(dan): Account for timestamp in data_size;
+    (*data_size) += state.key.key.len + state.value.len + 12;
+    state = DBIncIterNext(iter);
+  }
+  // std::cout << iter->intenterr << std::endl;
+
+  if (*entries == 0) {
+    return kSuccess;
+  }
+  return DBSstFileWriterClose(sst);
 }

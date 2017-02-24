@@ -274,6 +274,23 @@ DBStatus DBSstFileWriterClose(DBSstFileWriter* fw);
 
 void DBRunLDB(int argc, char** argv);
 
+typedef struct DBIncIterator DBIncIterator;
+
+bool DBIncIterIntentErr(DBIncIterator* iter);
+
+DBIncIterator* DBNewIncIter(DBEngine* db);
+
+void DBIncIterDestroy(DBIncIterator* iter);
+
+DBIterState DBIncIterReset(DBIncIterator* iter, DBKey start, DBKey end);
+
+DBIterState DBIncIterNext(DBIncIterator* iter);
+
+DBStatus DBIncIterError(DBIncIterator* iter);
+
+DBStatus DBIncIterToSst(DBIncIterator* iter, DBSlice path, int64_t* entries, int64_t* data_size);
+
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -7,12 +7,16 @@
 //     https://github.com/cockroachdb/cockroach/blob/master/LICENSE
 
 #include <memory>
+#include "rocksdb/db.h"
 #include "rocksdb/iterator.h"
 #include "rocksdb/comparator.h"
+#include "rocksdb/options.h"
 #include "rocksdb/write_batch.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
 #include "../../../storage/engine/db_internal.h"
-#include "db.h"
+#include "cockroach/pkg/util/hlc/timestamp.pb.h"
+#include "cockroach/pkg/storage/engine/enginepb/mvcc.pb.h"
+#include "dbccl.h"
 
 extern "C" {
 #include "_cgo_export.h"

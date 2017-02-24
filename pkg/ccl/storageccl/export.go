@@ -13,7 +13,6 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl/engineccl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -88,25 +87,32 @@ func evalExport(
 		}
 	}()
 
-	// TODO(dan): Move all this iteration into cpp to avoid the cgo calls.
-	// TODO(dan): Consider checking ctx periodically during the MVCCIterate call.
-	var entries int64
-	iter := engineccl.NewMVCCIncrementalIterator(batch)
-	defer iter.Close()
-	iter.Reset(args.Key, args.EndKey, args.StartTime, h.Timestamp)
-	for ; iter.Valid(); iter.Next() {
-		key, value := iter.Key(), iter.Value()
-		if log.V(3) {
-			log.Infof(ctx, "Export %+v %+v", key, value)
-		}
-		entries++
-		if err := sst.Add(engine.MVCCKeyValue{Key: key, Value: value}); err != nil {
-			return storage.EvalResult{}, errors.Wrapf(err, "adding key %s", key)
-		}
-	}
-	if err := iter.Error(); err != nil {
-		// The error may be a WriteIntentError. In which case, returning it will
-		// cause this command to be retried.
+	// // TODO(dan): Move all this iteration into cpp to avoid the cgo calls.
+	// // TODO(dan): Consider checking ctx periodically during the MVCCIterate call.
+	// var entries int64
+	// iter := engine.NewMVCCIncrementalIterator(batch.(engine.InMem).RocksDB)
+	// defer iter.Close()
+	// iter.Reset(args.Key, args.EndKey, args.StartTime, h.Timestamp)
+	// for ; iter.Valid(); iter.Next() {
+	// 	key, value := iter.Key(), iter.Value()
+	// 	if log.V(3) {
+	// 		log.Infof(ctx, "Export %+v %+v", key, value)
+	// 	}
+	// 	entries++
+	// 	if err := sst.Add(engine.MVCCKeyValue{Key: key, Value: value}); err != nil {
+	// 		return storage.EvalResult{}, errors.Wrapf(err, "adding key %s", key)
+	// 	}
+	// }
+	// if err := iter.Error(); err != nil {
+	// 	// The error may be a WriteIntentError. In which case, returning it will
+	// 	// cause this command to be retried.
+	// 	return storage.EvalResult{}, err
+	// }
+
+	entries, size, err := engine.MVCCExportKeys(
+		ctx, batch.(engine.InMem).RocksDB, args.Key, args.EndKey, args.StartTime, h.Timestamp, path,
+	)
+	if err != nil {
 		return storage.EvalResult{}, err
 	}
 
@@ -120,11 +126,11 @@ func evalExport(
 		return storage.EvalResult{}, nil
 	}
 
-	if err := sst.Close(); err != nil {
-		return storage.EvalResult{}, err
-	}
-	size := sst.DataSize
-	sst = nil
+	// if err := sst.Close(); err != nil {
+	// 	return storage.EvalResult{}, err
+	// }
+	// size := sst.DataSize
+	// sst = nil
 
 	// TODO(dan): Compute a checksum of the file before upload.
 	// https://github.com/cockroachdb/cockroach/issues/13482.

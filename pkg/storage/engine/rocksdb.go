@@ -292,6 +292,10 @@ type RocksDB struct {
 
 var _ Engine = &RocksDB{}
 
+func (r *RocksDB) RawEngine() *C.DBEngine {
+	return r.rdb
+}
+
 // NewRocksDB allocates and returns a new RocksDB object.
 // This creates options and opens the database. If the database
 // doesn't yet exist at the specified directory, one is initialized
@@ -420,10 +424,10 @@ func (r *RocksDB) closed() bool {
 	return r.rdb == nil
 }
 
-// Attrs returns the list of attributes describing this engine. This
+// Attrs returns the list of attributes describing this  This
 // may include a specification of disk type (e.g. hdd, ssd, fio, etc.)
 // and potentially other labels to identify important attributes of
-// the engine.
+// the
 func (r *RocksDB) Attrs() roachpb.Attributes {
 	return r.attrs
 }
@@ -485,7 +489,7 @@ func (r *RocksDB) ClearIterRange(iter Iterator, start, end MVCCKey) error {
 }
 
 // Iterate iterates from start to end keys, invoking f on each
-// key/value pair. See engine.Iterate for details.
+// key/value pair. See Iterate for details.
 func (r *RocksDB) Iterate(start, end MVCCKey, f func(MVCCKeyValue) (bool, error)) error {
 	return dbIterate(r.rdb, r, start, end, f)
 }
@@ -573,13 +577,13 @@ func (r *RocksDB) Flush() error {
 	return statusToError(C.DBFlush(r.rdb))
 }
 
-// NewIterator returns an iterator over this rocksdb engine.
+// NewIterator returns an iterator over this rocksdb
 func (r *RocksDB) NewIterator(prefix bool) Iterator {
 	return newRocksDBIterator(r.rdb, prefix, r)
 }
 
 // NewSnapshot creates a snapshot handle from engine and returns a
-// read-only rocksDBSnapshot engine.
+// read-only rocksDBSnapshot
 func (r *RocksDB) NewSnapshot() Reader {
 	if r.rdb == nil {
 		panic("RocksDB is not initialized yet")
@@ -590,13 +594,13 @@ func (r *RocksDB) NewSnapshot() Reader {
 	}
 }
 
-// NewBatch returns a new batch wrapping this rocksdb engine.
+// NewBatch returns a new batch wrapping this rocksdb
 func (r *RocksDB) NewBatch() Batch {
 	return newRocksDBBatch(r, false /* writeOnly */)
 }
 
 // NewWriteOnlyBatch returns a new write-only batch wrapping this rocksdb
-// engine.
+//
 func (r *RocksDB) NewWriteOnlyBatch() Batch {
 	return newRocksDBBatch(r, true /* writeOnly */)
 }
@@ -743,7 +747,7 @@ func (r *distinctBatch) Close() {
 	r.distinctOpen = false
 }
 
-// NewIterator returns an iterator over the batch and underlying engine. Note
+// NewIterator returns an iterator over the batch and underlying  Note
 // that the returned iterator is cached and re-used for the lifetime of the
 // batch. A panic will be thrown if multiple prefix or normal (non-prefix)
 // iterators are used simultaneously on the same batch.
@@ -1049,7 +1053,7 @@ func (r *rocksDBBatch) ClearIterRange(iter Iterator, start, end MVCCKey) error {
 	return dbClearIterRange(r.batch, iter, start, end)
 }
 
-// NewIterator returns an iterator over the batch and underlying engine. Note
+// NewIterator returns an iterator over the batch and underlying  Note
 // that the returned iterator is cached and re-used for the lifetime of the
 // batch. A panic will be thrown if multiple prefix or normal (non-prefix)
 // iterators are used simultaneously on the same batch.
@@ -1198,9 +1202,9 @@ func (r *rocksDBIterator) init(rdb *C.DBEngine, prefix bool, engine Reader) {
 }
 
 func (r *rocksDBIterator) checkEngineOpen() {
-	if r.engine.closed() {
-		panic("iterator used after backing engine closed")
-	}
+	// if r.closed() {
+	// 	panic("iterator used after backing engine closed")
+	// }
 }
 
 func (r *rocksDBIterator) destroy() {
@@ -1700,4 +1704,123 @@ func RunLDB(args []string) {
 	}()
 
 	C.DBRunLDB(C.int(len(argv)), &argv[0])
+}
+
+// MVCCIncrementalIterator iterates over the diff of the key range [start,end)
+// and time range [start,end). If a key was added or modified between startTime
+// and endTime, the iterator will position at the most recent version (before
+// endTime) of that key. If the key was most recently deleted, this is signalled
+// with an empty value.
+//
+// Expected usage:
+//    iter := NewMVCCIncrementalIterator(e)
+//    defer iter.Close()
+//    for iter.Reset(...); iter.Valid(); iter.Next() {
+//        [code using iter.Key() and iter.Value()]
+//    }
+//    if err := iter.Error(); err != nil {
+//      ...
+//    }
+type MVCCIncrementalIterator struct {
+	iter  *C.DBIncIterator
+	valid bool
+	key   C.DBKey
+	value C.DBSlice
+}
+
+// NewMVCCIncrementalIterator creates an MVCCIncrementalIterator with the
+// specified
+func NewMVCCIncrementalIterator(e *RocksDB) *MVCCIncrementalIterator {
+	return &MVCCIncrementalIterator{iter: C.DBNewIncIter((*C.DBEngine)(unsafe.Pointer(e.RawEngine())))}
+}
+
+// Close frees up resources held by the iterator.
+func (i *MVCCIncrementalIterator) Close() {
+	C.DBIncIterDestroy(i.iter)
+}
+
+// Reset begins a new iteration with the specified key and time ranges.
+func (i *MVCCIncrementalIterator) Reset(
+	startKey, endKey roachpb.Key, startTime, endTime hlc.Timestamp,
+) {
+	start := MVCCKey{Key: startKey, Timestamp: startTime}
+	end := MVCCKey{Key: endKey, Timestamp: endTime}
+	// fmt.Printf("%x %x\n", []byte(endKey), []byte(end.Key))
+	i.setState(C.DBIncIterReset(i.iter, goToCKey(start), goToCKey(end)))
+}
+
+func (i *MVCCIncrementalIterator) setState(state C.DBIterState) {
+	i.valid = bool(state.valid)
+	i.key = state.key
+	i.value = state.value
+	// log.Info(i.ctx, i.valid, " ", i.key, " ", i.value)
+	// fmt.Printf("%+v\n", i)
+}
+
+// Next advances the iterator to the next key/value in the iteration.
+func (i *MVCCIncrementalIterator) Next() {
+	i.setState(C.DBIncIterNext(i.iter))
+}
+
+// Valid returns true if the iterator is currently valid. An iterator that
+// hasn't had Seek called on it or has gone past the end of the key range is
+// invalid.
+func (i *MVCCIncrementalIterator) Valid() bool {
+	// fmt.Printf("Valid %v\n", i.valid)
+	return i.valid
+}
+
+// Error returns the error, if any, which the iterator encountered.
+func (i *MVCCIncrementalIterator) Error() error {
+	if C.DBIncIterIntentErr(i.iter) {
+		return &roachpb.WriteIntentError{
+			Intents: []roachpb.Intent{{Span: roachpb.Span{Key: nil}, Status: roachpb.PENDING}},
+			// Intents: []roachpb.Intent{{Span: roachpb.Span{Key: metaKey.Key}, Status: roachpb.PENDING, Txn: *i.meta.Txn}},
+		}
+	}
+	return statusToError(C.DBIncIterError(i.iter))
+}
+
+// Key returns the current key.
+func (i *MVCCIncrementalIterator) Key() MVCCKey {
+	// k := cToGoKey(i.key)
+	// fmt.Printf("Key %x %v\n", k.Key, k.Timestamp)
+	// The data returned by rocksdb_iter_{key,value} is not meant to be
+	// freed by the client. It is a direct reference to the data managed
+	// by the iterator, so it is copied instead of freed.
+	return cToGoKey(i.key)
+}
+
+// Value returns the current value as a byte slice.
+func (i *MVCCIncrementalIterator) Value() []byte {
+	return cSliceToGoBytes(i.value)
+}
+
+func MVCCExportKeys(
+	ctx context.Context,
+	e *RocksDB,
+	startKey, endKey roachpb.Key,
+	startTime, endTime hlc.Timestamp,
+	path string,
+) (int64, int64, error) {
+	start := MVCCKey{Key: startKey, Timestamp: startTime}
+	end := MVCCKey{Key: endKey, Timestamp: endTime}
+	iter := C.DBNewIncIter((*C.DBEngine)(unsafe.Pointer(e.RawEngine())))
+	defer C.DBIncIterDestroy(iter)
+	_ = C.DBIncIterReset(iter, goToCKey(start), goToCKey(end))
+	// fmt.Println(bool(C.DBIncIterIntentErr(iter)))
+
+	var entries C.int64_t
+	var dataSize C.int64_t
+	err := statusToError(C.DBIncIterToSst(iter, goToCSlice([]byte(path)), &entries, &dataSize))
+	if err != nil {
+		return 0, 0, err
+	}
+	if bool(C.DBIncIterIntentErr(iter)) {
+		return 0, 0, &roachpb.WriteIntentError{
+			Intents: []roachpb.Intent{{Span: roachpb.Span{Key: nil}, Status: roachpb.PENDING}},
+			// Intents: []roachpb.Intent{{Span: roachpb.Span{Key: metaKey.Key}, Status: roachpb.PENDING, Txn: *i.meta.Txn}},
+		}
+	}
+	return int64(entries), int64(dataSize), statusToError(C.DBIncIterError(iter))
 }

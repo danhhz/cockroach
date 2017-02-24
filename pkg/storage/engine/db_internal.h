@@ -28,6 +28,14 @@ std::string ToString(DBSlice s);
 // ordering as these keys do not sort lexicographically correctly.
 std::string EncodeKey(DBKey k);
 
+bool SplitKey(rocksdb::Slice buf, rocksdb::Slice *key, rocksdb::Slice *timestamp);
+
+bool DecodeKey(rocksdb::Slice buf, rocksdb::Slice *key, int64_t *wall_time, int32_t *logical);
+
+DBSlice ToDBSlice(const rocksdb::Slice& s);
+
+DBStatus ToDBStatus(const rocksdb::Status& status);
+
 // FmtStatus formats the given arguments printf-style into a DBStatus.
 DBStatus FmtStatus(const char *fmt, ...);
 
@@ -43,3 +51,5 @@ const ::rocksdb::Comparator* CockroachComparator();
 // Stats are only computed for keys between the given range.
 MVCCStatsResult MVCCComputeStatsInternal(
     ::rocksdb::Iterator* const iter_rep, DBKey start, DBKey end, int64_t now_nanos);
+
+rocksdb::DB* DBEngineGetRep(DBEngine* e);
