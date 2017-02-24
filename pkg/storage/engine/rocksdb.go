@@ -1105,7 +1105,7 @@ func (r *rocksDBBatch) Commit(sync bool) error {
 		r.batch = nil
 	}
 
-	const batchCommitWarnThreshold = 500 * time.Millisecond
+	const batchCommitWarnThreshold = 500 * time.Minute
 	if elapsed := timeutil.Since(start); elapsed >= batchCommitWarnThreshold {
 		log.Warningf(context.TODO(), "batch [%d/%d/%d] commit took %s (>%s):\n%s",
 			count, size, r.flushes, elapsed, batchCommitWarnThreshold, debug.Stack())
