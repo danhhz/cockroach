@@ -82,8 +82,23 @@ func SetKVBatchSize(val int64) func() {
 	return func() { kvBatchSize = oldVal }
 }
 
-// kvFetcher handles retrieval of key/values.
-type kvFetcher struct {
+// KVFetcher TODO(dan)
+type KVFetcher interface {
+	Init(context.Context, *client.Txn, roachpb.Spans, bool, bool, int64, bool) error
+	NextKV(context.Context) (bool, client.KeyValue, error)
+	GetRangesInfo() []roachpb.RangeInfo
+	Close()
+}
+
+// MakeKVFetcher TODO(dan)
+var MakeKVFetcher = func(_ *TableDescriptor) KVFetcher {
+	return &txnKVFetcher{}
+}
+
+var _ KVFetcher = &txnKVFetcher{}
+
+// txnKVFetcher handles retrieval of key/values.
+type txnKVFetcher struct {
 	// "Constant" fields, provided by the caller.
 	txn             *client.Txn
 	spans           roachpb.Spans
@@ -112,7 +127,9 @@ type kvFetcher struct {
 	rangeInfos []roachpb.RangeInfo
 }
 
-func (f *kvFetcher) getRangesInfo() []roachpb.RangeInfo {
+func (f *txnKVFetcher) Close() {}
+
+func (f *txnKVFetcher) GetRangesInfo() []roachpb.RangeInfo {
 	if !f.returnRangeInfo {
 		panic("GetRangeInfo() called on kvFetcher that wasn't configured with returnRangeInfo")
 	}
@@ -120,7 +137,7 @@ func (f *kvFetcher) getRangesInfo() []roachpb.RangeInfo {
 }
 
 // getBatchSize returns the max size of the next batch.
-func (f *kvFetcher) getBatchSize() int64 {
+func (f *txnKVFetcher) getBatchSize() int64 {
 	if !f.useBatchLimit {
 		return 0
 	}
@@ -161,23 +178,24 @@ func (f *kvFetcher) getBatchSize() int64 {
 	}
 }
 
-// makeKVFetcher initializes a kvFetcher for the given spans.
+// Init initializes a txnKVFetcher for the given spans.
 //
 // If useBatchLimit is true, batches are limited to kvBatchSize. If
 // firstBatchLimit is also set, the first batch is limited to that value.
 // Subsequent batches are larger, up to kvBatchSize.
 //
 // Batch limits can only be used if the spans are ordered.
-func makeKVFetcher(
+func (f *txnKVFetcher) Init(
+	_ context.Context,
 	txn *client.Txn,
 	spans roachpb.Spans,
 	reverse bool,
 	useBatchLimit bool,
 	firstBatchLimit int64,
 	returnRangeInfo bool,
-) (kvFetcher, error) {
+) error {
 	if firstBatchLimit < 0 || (!useBatchLimit && firstBatchLimit != 0) {
-		return kvFetcher{}, errors.Errorf("invalid batch limit %d (useBatchLimit: %t)",
+		return errors.Errorf("invalid batch limit %d (useBatchLimit: %t)",
 			firstBatchLimit, useBatchLimit)
 	}
 
@@ -185,7 +203,7 @@ func makeKVFetcher(
 		// Verify the spans are ordered if a batch limit is used.
 		for i := 1; i < len(spans); i++ {
 			if spans[i].Key.Compare(spans[i-1].EndKey) < 0 {
-				return kvFetcher{}, errors.Errorf("unordered spans (%s %s)", spans[i-1], spans[i])
+				return errors.Errorf("unordered spans (%s %s)", spans[i-1], spans[i])
 			}
 		}
 	}
@@ -201,18 +219,17 @@ func makeKVFetcher(
 		}
 	}
 
-	return kvFetcher{
-		txn:             txn,
-		spans:           copySpans,
-		reverse:         reverse,
-		useBatchLimit:   useBatchLimit,
-		firstBatchLimit: firstBatchLimit,
-		returnRangeInfo: returnRangeInfo,
-	}, nil
+	f.txn = txn
+	f.spans = copySpans
+	f.reverse = reverse
+	f.useBatchLimit = useBatchLimit
+	f.firstBatchLimit = firstBatchLimit
+	f.returnRangeInfo = returnRangeInfo
+	return nil
 }
 
 // fetch retrieves spans from the kv
-func (f *kvFetcher) fetch(ctx context.Context) error {
+func (f *txnKVFetcher) fetch(ctx context.Context) error {
 	batchSize := f.getBatchSize()
 
 	b := &f.batch
@@ -282,9 +299,9 @@ func (f *kvFetcher) fetch(ctx context.Context) error {
 	return nil
 }
 
-// nextKV returns the next key/value (initiating fetches as necessary). When there are no more keys,
+// NextKV returns the next key/value (initiating fetches as necessary). When there are no more keys,
 // returns false and an empty key/value.
-func (f *kvFetcher) nextKV(ctx context.Context) (bool, client.KeyValue, error) {
+func (f *txnKVFetcher) NextKV(ctx context.Context) (bool, client.KeyValue, error) {
 	if f.kvIndex == len(f.kvs) {
 		if f.fetchEnd {
 			return false, client.KeyValue{}, nil

@@ -207,11 +207,21 @@ func (vs *virtualSchemaHolder) getVirtualSchemaEntry(name string) (virtualSchema
 
 // getVirtualDatabaseDesc checks if the provided name matches a virtual database,
 // and if so, returns that database's descriptor.
-func (vs *virtualSchemaHolder) getVirtualDatabaseDesc(name string) *sqlbase.DatabaseDescriptor {
-	if e, ok := vs.getVirtualSchemaEntry(name); ok {
-		return e.desc
+func (vs *virtualSchemaHolder) GetVirtualDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error) {
+	if VirtualTablerHook != nil {
+		d, err := VirtualTablerHook.GetVirtualDatabaseDesc(name)
+		if err != nil {
+			return nil, err
+		}
+		if d != nil {
+			return d, nil
+		}
 	}
-	return nil
+
+	if e, ok := vs.getVirtualSchemaEntry(name); ok {
+		return e.desc, nil
+	}
+	return nil, nil
 }
 
 // isVirtualDatabase checks if the provided name corresponds to a virtual database.
@@ -244,15 +254,25 @@ func (vs *virtualSchemaHolder) getVirtualTableEntry(
 
 // VirtualTabler is used to fetch descriptors for virtual tables and databases.
 type VirtualTabler interface {
-	getVirtualTableDesc(tn *parser.TableName) (*sqlbase.TableDescriptor, error)
-	getVirtualDatabaseDesc(name string) *sqlbase.DatabaseDescriptor
+	GetVirtualTableDesc(tn *parser.TableName) (*sqlbase.TableDescriptor, error)
+	GetVirtualDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error)
 }
 
 // getVirtualTableDesc checks if the provided name matches a virtual database/table
 // pair, and returns its descriptor if it does.
-func (vs *virtualSchemaHolder) getVirtualTableDesc(
+func (vs *virtualSchemaHolder) GetVirtualTableDesc(
 	tn *parser.TableName,
 ) (*sqlbase.TableDescriptor, error) {
+	if VirtualTablerHook != nil {
+		t, err := VirtualTablerHook.GetVirtualTableDesc(tn)
+		if err != nil {
+			return nil, err
+		}
+		if t != nil {
+			return t, nil
+		}
+	}
+
 	t, err := vs.getVirtualTableEntry(tn)
 	if err != nil {
 		return nil, err
@@ -271,10 +291,10 @@ var NilVirtualTabler nilVirtualTabler
 
 type nilVirtualTabler struct{}
 
-func (nilVirtualTabler) getVirtualTableDesc(tn *parser.TableName) (*sqlbase.TableDescriptor, error) {
+func (nilVirtualTabler) GetVirtualTableDesc(tn *parser.TableName) (*sqlbase.TableDescriptor, error) {
 	return nil, nil
 }
 
-func (nilVirtualTabler) getVirtualDatabaseDesc(name string) *sqlbase.DatabaseDescriptor {
-	return nil
+func (nilVirtualTabler) GetVirtualDatabaseDesc(name string) (*sqlbase.DatabaseDescriptor, error) {
+	return nil, nil
 }

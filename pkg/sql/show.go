@@ -108,7 +108,7 @@ func checkTableExists(ctx context.Context, p *planner, tn *parser.TableName) err
 // see the specified table.
 func checkTablePrivileges(ctx context.Context, p *planner, tn *parser.TableName) error {
 	// Skip the checking if the table is a virtual table.
-	if virDesc, err := p.session.virtualSchemas.getVirtualTableDesc(tn); err != nil {
+	if virDesc, err := p.session.virtualSchemas.GetVirtualTableDesc(tn); err != nil {
 		return err
 	} else if virDesc != nil {
 		return nil

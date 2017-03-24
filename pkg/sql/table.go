@@ -141,7 +141,7 @@ func (p *planner) getTableOrViewDesc(
 func getTableOrViewDesc(
 	ctx context.Context, txn *client.Txn, vt VirtualTabler, tn *parser.TableName,
 ) (*sqlbase.TableDescriptor, error) {
-	virtual, err := vt.getVirtualTableDesc(tn)
+	virtual, err := vt.GetVirtualTableDesc(tn)
 	if err != nil || virtual != nil {
 		if sqlbase.IsUndefinedTableError(err) {
 			return nil, nil
@@ -281,7 +281,8 @@ func (p *planner) getTableLease(
 
 	isSystemDB := tn.Database() == sqlbase.SystemDB.Name
 	isVirtualDB := p.session.virtualSchemas.isVirtualDatabase(tn.Database())
-	if isSystemDB || isVirtualDB || testDisableTableLeases {
+	isArchiveDB := len(tn.ArchiveDir) > 0
+	if isSystemDB || isVirtualDB || testDisableTableLeases || isArchiveDB {
 		// We don't go through the normal lease mechanism for:
 		// - system tables. The system.lease and system.descriptor table, in
 		//   particular, are problematic because they are used for acquiring

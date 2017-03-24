@@ -85,7 +85,7 @@ type RowFetcher struct {
 
 	// -- Fields updated during a scan --
 
-	kvFetcher      kvFetcher
+	kvFetcher      KVFetcher
 	keyVals        []EncDatum  // the index key values for the current row
 	extraVals      EncDatumRow // the extra column values for unique indexes
 	indexKey       []byte      // the index key of the current row
@@ -125,6 +125,10 @@ func (rf *RowFetcher) Init(
 	rf.returnRangeInfo = returnRangeInfo
 	rf.row = make([]EncDatum, len(rf.cols))
 	rf.decodedRow = make([]parser.Datum, len(rf.cols))
+
+	if rf.desc.ArchiveReference != nil {
+		log.Infof(context.TODO(), "%+v", rf.desc)
+	}
 
 	var indexColumnIDs []ColumnID
 	indexColumnIDs, rf.indexColumnDirs = index.FullColumnIDs()
@@ -176,6 +180,13 @@ func (rf *RowFetcher) Init(
 	return nil
 }
 
+// Close TODO(dan)
+func (rf *RowFetcher) Close() {
+	if rf.kvFetcher != nil {
+		rf.kvFetcher.Close()
+	}
+}
+
 // StartScan initializes and starts the key-value scan. Can be used multiple
 // times.
 func (rf *RowFetcher) StartScan(
@@ -199,14 +210,15 @@ func (rf *RowFetcher) StartScan(
 		firstBatchLimit++
 	}
 
-	var err error
-	rf.kvFetcher, err = makeKVFetcher(txn, spans, rf.reverse, limitBatches, firstBatchLimit, rf.returnRangeInfo)
-	if err != nil {
+	rf.kvFetcher = MakeKVFetcher(rf.desc)
+	if err := rf.kvFetcher.Init(
+		ctx, txn, spans, rf.reverse, limitBatches, firstBatchLimit, rf.returnRangeInfo,
+	); err != nil {
 		return err
 	}
 
 	// Retrieve the first key.
-	_, err = rf.NextKey(ctx)
+	_, err := rf.NextKey(ctx)
 	return err
 }
 
@@ -217,7 +229,7 @@ func (rf *RowFetcher) NextKey(ctx context.Context) (rowDone bool, err error) {
 	var ok bool
 
 	for {
-		ok, rf.kv, err = rf.kvFetcher.nextKV(ctx)
+		ok, rf.kv, err = rf.kvFetcher.NextKV(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -613,7 +625,7 @@ func (rf *RowFetcher) Key() roachpb.Key {
 // GetRangeInfo returns information about the ranges where the rows came from.
 // The RangeInfo's are deduped and not ordered.
 func (rf *RowFetcher) GetRangeInfo() []roachpb.RangeInfo {
-	return rf.kvFetcher.getRangesInfo()
+	return rf.kvFetcher.GetRangesInfo()
 }
 
 // TODO(andrei): This is only here so that the unused functions linter doesn't

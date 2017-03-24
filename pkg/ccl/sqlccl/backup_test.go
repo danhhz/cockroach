@@ -1065,3 +1065,20 @@ func TestBackupRestorePermissions(t *testing.T) {
 		}
 	})
 }
+
+func TestBackupReadonlyQuery(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	const numAccounts = 10
+	_, dir, _, sqlDB, cleanupFn := backupRestoreTestSetup(t, singleNode, numAccounts)
+	defer cleanupFn()
+
+	sqlDB.Exec(`BACKUP DATABASE bench TO $1`, dir)
+	sqlDB.Exec(`DROP TABLE bench.bank`)
+
+	var rowCount int64
+	sqlDB.QueryRow(fmt.Sprintf(`SELECT count(*) FROM "%s".bench.bank`, dir)).Scan(&rowCount)
+	if rowCount != numAccounts {
+		t.Errorf("got %d rows expected %d", rowCount, numAccounts)
+	}
+}
