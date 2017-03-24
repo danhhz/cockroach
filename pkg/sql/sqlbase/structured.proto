@@ -487,6 +487,15 @@ message TableDescriptor {
   // a TableDescriptor represents a view.
   optional string view_query = 24 [(gogoproto.nullable) = false];
 
+  message ArchiveReference {
+    optional string dir = 1 [(gogoproto.nullable) = false];
+    optional uint32 parent_id = 2 [(gogoproto.nullable) = false,
+             (gogoproto.customname) = "ParentID", (gogoproto.casttype) = "ID"];
+    optional uint32 id = 3 [(gogoproto.nullable) = false,
+             (gogoproto.customname) = "ID", (gogoproto.casttype) = "ID"];
+  }
+  optional ArchiveReference archive_reference = 27;
+
   // The IDs of all relations that this depends on.
   // Only ever populated if this descriptor is for a view.
   repeated uint32 dependsOn = 25 [(gogoproto.customname) = "DependsOn",

@@ -144,7 +144,9 @@ func (n *scanNode) Start(context.Context) error {
 		n.valNeededForCol, false /* returnRangeInfo */)
 }
 
-func (n *scanNode) Close(context.Context) {}
+func (n *scanNode) Close(context.Context) {
+	n.fetcher.Close()
+}
 
 // initScan sets up the rowFetcher and starts a scan.
 func (n *scanNode) initScan(ctx context.Context) error {

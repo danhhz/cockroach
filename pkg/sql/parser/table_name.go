@@ -98,6 +98,7 @@ type TableNameReference interface {
 // TableName corresponds to the name of a table in a FROM clause,
 // INSERT or UPDATE statement (and possibly other places).
 type TableName struct {
+	ArchiveDir   Name
 	DatabaseName Name
 	TableName    Name
 
@@ -111,6 +112,10 @@ type TableName struct {
 
 // Format implements the NodeFormatter interface.
 func (t *TableName) Format(buf *bytes.Buffer, f FmtFlags) {
+	if len(t.ArchiveDir) > 0 {
+		FormatNode(buf, f, t.ArchiveDir)
+		buf.WriteByte('.')
+	}
 	if !t.DBNameOriginallyOmitted || f.tableNameNormalizer != nil {
 		FormatNode(buf, f, t.DatabaseName)
 		buf.WriteByte('.')
@@ -146,7 +151,7 @@ func (t *TableName) Database() string {
 // valid if e.g. the name refers to a in-query table alias
 // (AS) or is qualified later using the QualifyWithDatabase method.
 func (n UnresolvedName) normalizeTableNameAsValue() (TableName, error) {
-	if len(n) == 0 || len(n) > 2 {
+	if len(n) == 0 || len(n) > 3 {
 		return TableName{}, fmt.Errorf("invalid table name: %q", n)
 	}
 
@@ -162,7 +167,7 @@ func (n UnresolvedName) normalizeTableNameAsValue() (TableName, error) {
 	res := TableName{TableName: name, DBNameOriginallyOmitted: true}
 
 	if len(n) > 1 {
-		res.DatabaseName, ok = n[0].(Name)
+		res.DatabaseName, ok = n[len(n)-2].(Name)
 		if !ok {
 			return TableName{}, fmt.Errorf("invalid database name: %q", n[0])
 		}
@@ -172,6 +177,13 @@ func (n UnresolvedName) normalizeTableNameAsValue() (TableName, error) {
 		}
 
 		res.DBNameOriginallyOmitted = false
+	}
+
+	if len(n) > 2 {
+		res.ArchiveDir, ok = n[len(n)-3].(Name)
+		if !ok {
+			return TableName{}, fmt.Errorf("invalid archive dir: %q", n[0])
+		}
 	}
 
 	return res, nil

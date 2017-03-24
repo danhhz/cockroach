@@ -194,6 +194,9 @@ type SessionArgs struct {
 	ApplicationName string
 }
 
+// VirtualTabler TODO(dan)
+var VirtualTablerHook VirtualTabler
+
 // NewSession creates and initializes a new Session object.
 // remote can be nil.
 func NewSession(

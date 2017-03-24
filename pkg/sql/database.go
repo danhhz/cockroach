@@ -136,7 +136,11 @@ func (p *planner) getDatabaseDesc(
 func getDatabaseDesc(
 	ctx context.Context, txn *client.Txn, vt VirtualTabler, name string,
 ) (*sqlbase.DatabaseDescriptor, error) {
-	if virtual := vt.getVirtualDatabaseDesc(name); virtual != nil {
+	virtual, err := vt.GetVirtualDatabaseDesc(name)
+	if err != nil {
+		return nil, err
+	}
+	if virtual != nil {
 		return virtual, nil
 	}
 	desc := &sqlbase.DatabaseDescriptor{}
@@ -224,7 +228,11 @@ func (p *planner) getAllDatabaseDescs(ctx context.Context) ([]*sqlbase.DatabaseD
 
 // getDatabaseID implements the DatabaseAccessor interface.
 func (p *planner) getDatabaseID(ctx context.Context, name string) (sqlbase.ID, error) {
-	if virtual := p.session.virtualSchemas.getVirtualDatabaseDesc(name); virtual != nil {
+	virtual, err := p.session.virtualSchemas.GetVirtualDatabaseDesc(name)
+	if err != nil {
+		return 0, err
+	}
+	if virtual != nil {
 		return virtual.GetID(), nil
 	}
 
