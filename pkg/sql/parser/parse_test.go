@@ -159,6 +159,8 @@ func TestParse(t *testing.T) {
 		{`CREATE TABLE a (b STRING COLLATE "DE")`},
 		{`CREATE TABLE a (b STRING[] COLLATE "DE")`},
 
+		{`CREATE TABLE a (b SERIAL) PARTITION BY LIST (b) (PARTITION c VALUES (1))`},
+
 		{`CREATE VIEW a AS SELECT * FROM b`},
 		{`CREATE VIEW a AS SELECT b.* FROM b LIMIT 5`},
 		{`CREATE VIEW a AS (SELECT c, d FROM b WHERE c > 0 ORDER BY c)`},

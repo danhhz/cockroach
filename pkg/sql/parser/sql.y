@@ -346,6 +346,15 @@ func (u *sqlSymUnion) kvOptions() []KVOption {
 func (u *sqlSymUnion) transactionModes() TransactionModes {
     return u.val.(TransactionModes)
 }
+func (u *sqlSymUnion) partitionBy() *PartitionBy {
+    return u.val.(*PartitionBy)
+}
+func (u *sqlSymUnion) partitionList() []Partition {
+    return u.val.([]Partition)
+}
+func (u *sqlSymUnion) partition() Partition {
+    return u.val.(Partition)
+}
 
 %}
 
@@ -406,7 +415,7 @@ func (u *sqlSymUnion) transactionModes() TransactionModes {
 %token <str>   KEY KEYS KV
 
 %token <str>   LATERAL LC_CTYPE LC_COLLATE
-%token <str>   LEADING LEAST LEFT LEVEL LIKE LIMIT LOCAL
+%token <str>   LEADING LEAST LEFT LEVEL LIKE LIMIT LIST LOCAL
 %token <str>   LOCALTIME LOCALTIMESTAMP LOW LSHIFT
 
 %token <str>   MATCH MINUTE MONTH
@@ -631,6 +640,9 @@ func (u *sqlSymUnion) transactionModes() TransactionModes {
 
 %type <TableDefs> opt_table_elem_list table_elem_list
 %type <*InterleaveDef> opt_interleave
+%type <*PartitionBy> opt_partition_by
+%type <Partition> partition
+%type <[]Partition> partition_list
 %type <empty> opt_all_clause
 %type <bool> distinct_clause
 %type <NameList> opt_column_list
@@ -2469,9 +2481,9 @@ pause_stmt:
 // WEBDOCS/create-table.html
 // WEBDOCS/create-table-as.html
 create_table_stmt:
-  CREATE TABLE any_name '(' opt_table_elem_list ')' opt_interleave
+  CREATE TABLE any_name '(' opt_table_elem_list ')' opt_interleave opt_partition_by
   {
-    $$.val = &CreateTable{Table: $3.normalizableTableName(), IfNotExists: false, Interleave: $7.interleave(), Defs: $5.tblDefs(), AsSource: nil, AsColumnNames: nil}
+    $$.val = &CreateTable{Table: $3.normalizableTableName(), IfNotExists: false, Interleave: $7.interleave(), Defs: $5.tblDefs(), AsSource: nil, AsColumnNames: nil, PartitionBy: $8.partitionBy()}
   }
 | CREATE TABLE IF NOT EXISTS any_name '(' opt_table_elem_list ')' opt_interleave
   {
@@ -2546,6 +2558,40 @@ opt_interleave_drop_behavior:
 | /* EMPTY */
   {
     $$.val = DropDefault
+  }
+
+// TODO(dan): PARTITION BY RANGE
+opt_partition_by:
+  PARTITION BY LIST '(' name_list ')' '(' partition_list ')'
+  {
+    $$.val = &PartitionBy{
+      Typ: PartitionByList,
+      Fields: $5.nameList(),
+      Partitions: $8.partitionList(),
+    }
+  }
+| /* EMPTY */
+  {
+    $$.val = (*PartitionBy)(nil)
+  }
+
+partition_list:
+  partition
+  {
+    $$.val = []Partition{$1.partition()}
+  }
+/* TODO(dan): figure out this shift/reduce conflict
+  | partition_list ',' partition
+  {
+    $$.val = append($1.partitionList(), $3.partition())
+  }
+*/
+
+partition:
+  PARTITION any_name values_clause
+  {
+    // TODO(dan): select_clause instead of values_clause
+    $$.val = Partition{Name: $2.unresolvedName(), Values: $3.selectStmt()}
   }
 
 column_def:
@@ -6252,6 +6298,7 @@ unreserved_keyword:
 | LC_COLLATE
 | LC_CTYPE
 | LEVEL
+| LIST
 | LOCAL
 | LOW
 | MATCH
