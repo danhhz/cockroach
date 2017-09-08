@@ -19,6 +19,7 @@ It has these top-level messages:
 	ColumnFamilyDescriptor
 	InterleaveDescriptor
 	IndexDescriptor
+	PartitioningDescriptor
 	DescriptorMutation
 	TableDescriptor
 	DatabaseDescriptor

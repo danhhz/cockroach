@@ -14208,6 +14208,126 @@ export namespace cockroach {
             public toJSON(): { [k: string]: any };
         }
 
+        type PartitionSpan$Properties = {
+            span?: cockroach.roachpb.Span$Properties;
+            partition?: string;
+        };
+
+        /**
+         * Constructs a new PartitionSpan.
+         * @exports cockroach.config.PartitionSpan
+         * @constructor
+         * @param {cockroach.config.PartitionSpan$Properties=} [properties] Properties to set
+         */
+        class PartitionSpan {
+
+            /**
+             * Constructs a new PartitionSpan.
+             * @exports cockroach.config.PartitionSpan
+             * @constructor
+             * @param {cockroach.config.PartitionSpan$Properties=} [properties] Properties to set
+             */
+            constructor(properties?: cockroach.config.PartitionSpan$Properties);
+
+            /**
+             * PartitionSpan span.
+             * @type {(cockroach.roachpb.Span$Properties|null)}
+             */
+            public span: (cockroach.roachpb.Span$Properties|null);
+
+            /**
+             * PartitionSpan partition.
+             * @type {string}
+             */
+            public partition: string;
+
+            /**
+             * Creates a new PartitionSpan instance using the specified properties.
+             * @param {cockroach.config.PartitionSpan$Properties=} [properties] Properties to set
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan instance
+             */
+            public static create(properties?: cockroach.config.PartitionSpan$Properties): cockroach.config.PartitionSpan;
+
+            /**
+             * Encodes the specified PartitionSpan message. Does not implicitly {@link cockroach.config.PartitionSpan.verify|verify} messages.
+             * @param {cockroach.config.PartitionSpan$Properties} message PartitionSpan message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            public static encode(message: cockroach.config.PartitionSpan$Properties, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified PartitionSpan message, length delimited. Does not implicitly {@link cockroach.config.PartitionSpan.verify|verify} messages.
+             * @param {cockroach.config.PartitionSpan$Properties} message PartitionSpan message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            public static encodeDelimited(message: cockroach.config.PartitionSpan$Properties, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a PartitionSpan message from the specified reader or buffer.
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): cockroach.config.PartitionSpan;
+
+            /**
+             * Decodes a PartitionSpan message from the specified reader or buffer, length delimited.
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): cockroach.config.PartitionSpan;
+
+            /**
+             * Verifies a PartitionSpan message.
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {?string} `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): string;
+
+            /**
+             * Creates a PartitionSpan message from a plain object. Also converts values to their respective internal types.
+             * @param {Object.<string,*>} object Plain object
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             */
+            public static fromObject(object: { [k: string]: any }): cockroach.config.PartitionSpan;
+
+            /**
+             * Creates a PartitionSpan message from a plain object. Also converts values to their respective internal types.
+             * This is an alias of {@link cockroach.config.PartitionSpan.fromObject}.
+             * @function
+             * @param {Object.<string,*>} object Plain object
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             */
+            public static from(object: { [k: string]: any }): cockroach.config.PartitionSpan;
+
+            /**
+             * Creates a plain object from a PartitionSpan message. Also converts values to other types if specified.
+             * @param {cockroach.config.PartitionSpan} message PartitionSpan
+             * @param {$protobuf.ConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            public static toObject(message: cockroach.config.PartitionSpan, options?: $protobuf.ConversionOptions): { [k: string]: any };
+
+            /**
+             * Creates a plain object from this PartitionSpan message. Also converts values to other types if specified.
+             * @param {$protobuf.ConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            public toObject(options?: $protobuf.ConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this PartitionSpan to JSON.
+             * @returns {Object.<string,*>} JSON object
+             */
+            public toJSON(): { [k: string]: any };
+        }
+
         type ZoneConfig$Properties = {
             replica_attrs?: cockroach.roachpb.Attributes$Properties[];
             range_min_bytes?: Long;
@@ -14215,6 +14335,8 @@ export namespace cockroach {
             gc?: cockroach.config.GCPolicy$Properties;
             num_replicas?: number;
             constraints?: cockroach.config.Constraints$Properties;
+            partition_spans?: cockroach.config.PartitionSpan$Properties[];
+            partition_zones?: { [k: string]: cockroach.config.ZoneConfig$Properties };
         };
 
         /**
@@ -14268,6 +14390,18 @@ export namespace cockroach {
              * @type {(cockroach.config.Constraints$Properties|null)}
              */
             public constraints: (cockroach.config.Constraints$Properties|null);
+
+            /**
+             * ZoneConfig partition_spans.
+             * @type {Array.<cockroach.config.PartitionSpan$Properties>}
+             */
+            public partition_spans: cockroach.config.PartitionSpan$Properties[];
+
+            /**
+             * ZoneConfig partition_zones.
+             * @type {Object.<string,cockroach.config.ZoneConfig$Properties>}
+             */
+            public partition_zones: { [k: string]: cockroach.config.ZoneConfig$Properties };
 
             /**
              * Creates a new ZoneConfig instance using the specified properties.
@@ -22860,6 +22994,7 @@ export namespace cockroach {
                 referenced_by?: cockroach.sql.sqlbase.ForeignKeyReference$Properties[];
                 interleave?: cockroach.sql.sqlbase.InterleaveDescriptor$Properties;
                 interleaved_by?: cockroach.sql.sqlbase.ForeignKeyReference$Properties[];
+                partitioning?: cockroach.sql.sqlbase.PartitioningDescriptor$Properties;
             };
 
             /**
@@ -22963,6 +23098,12 @@ export namespace cockroach {
                 public interleaved_by: cockroach.sql.sqlbase.ForeignKeyReference$Properties[];
 
                 /**
+                 * IndexDescriptor partitioning.
+                 * @type {(cockroach.sql.sqlbase.PartitioningDescriptor$Properties|null)}
+                 */
+                public partitioning: (cockroach.sql.sqlbase.PartitioningDescriptor$Properties|null);
+
+                /**
                  * Creates a new IndexDescriptor instance using the specified properties.
                  * @param {cockroach.sql.sqlbase.IndexDescriptor$Properties=} [properties] Properties to set
                  * @returns {cockroach.sql.sqlbase.IndexDescriptor} IndexDescriptor instance
@@ -23062,6 +23203,249 @@ export namespace cockroach {
                 enum Direction {
                     ASC = 0,
                     DESC = 1
+                }
+            }
+
+            type PartitioningDescriptor$Properties = {
+                num_columns?: number;
+                list?: cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties[];
+            };
+
+            /**
+             * Constructs a new PartitioningDescriptor.
+             * @exports cockroach.sql.sqlbase.PartitioningDescriptor
+             * @constructor
+             * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties=} [properties] Properties to set
+             */
+            class PartitioningDescriptor {
+
+                /**
+                 * Constructs a new PartitioningDescriptor.
+                 * @exports cockroach.sql.sqlbase.PartitioningDescriptor
+                 * @constructor
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties=} [properties] Properties to set
+                 */
+                constructor(properties?: cockroach.sql.sqlbase.PartitioningDescriptor$Properties);
+
+                /**
+                 * PartitioningDescriptor num_columns.
+                 * @type {number}
+                 */
+                public num_columns: number;
+
+                /**
+                 * PartitioningDescriptor list.
+                 * @type {Array.<cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties>}
+                 */
+                public list: cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties[];
+
+                /**
+                 * Creates a new PartitioningDescriptor instance using the specified properties.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties=} [properties] Properties to set
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor instance
+                 */
+                public static create(properties?: cockroach.sql.sqlbase.PartitioningDescriptor$Properties): cockroach.sql.sqlbase.PartitioningDescriptor;
+
+                /**
+                 * Encodes the specified PartitioningDescriptor message. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.verify|verify} messages.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} message PartitioningDescriptor message or plain object to encode
+                 * @param {$protobuf.Writer} [writer] Writer to encode to
+                 * @returns {$protobuf.Writer} Writer
+                 */
+                public static encode(message: cockroach.sql.sqlbase.PartitioningDescriptor$Properties, writer?: $protobuf.Writer): $protobuf.Writer;
+
+                /**
+                 * Encodes the specified PartitioningDescriptor message, length delimited. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.verify|verify} messages.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} message PartitioningDescriptor message or plain object to encode
+                 * @param {$protobuf.Writer} [writer] Writer to encode to
+                 * @returns {$protobuf.Writer} Writer
+                 */
+                public static encodeDelimited(message: cockroach.sql.sqlbase.PartitioningDescriptor$Properties, writer?: $protobuf.Writer): $protobuf.Writer;
+
+                /**
+                 * Decodes a PartitioningDescriptor message from the specified reader or buffer.
+                 * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                 * @param {number} [length] Message length if known beforehand
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 * @throws {Error} If the payload is not a reader or valid buffer
+                 * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                 */
+                public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): cockroach.sql.sqlbase.PartitioningDescriptor;
+
+                /**
+                 * Decodes a PartitioningDescriptor message from the specified reader or buffer, length delimited.
+                 * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 * @throws {Error} If the payload is not a reader or valid buffer
+                 * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                 */
+                public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): cockroach.sql.sqlbase.PartitioningDescriptor;
+
+                /**
+                 * Verifies a PartitioningDescriptor message.
+                 * @param {Object.<string,*>} message Plain object to verify
+                 * @returns {?string} `null` if valid, otherwise the reason why it is not
+                 */
+                public static verify(message: { [k: string]: any }): string;
+
+                /**
+                 * Creates a PartitioningDescriptor message from a plain object. Also converts values to their respective internal types.
+                 * @param {Object.<string,*>} object Plain object
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 */
+                public static fromObject(object: { [k: string]: any }): cockroach.sql.sqlbase.PartitioningDescriptor;
+
+                /**
+                 * Creates a PartitioningDescriptor message from a plain object. Also converts values to their respective internal types.
+                 * This is an alias of {@link cockroach.sql.sqlbase.PartitioningDescriptor.fromObject}.
+                 * @function
+                 * @param {Object.<string,*>} object Plain object
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 */
+                public static from(object: { [k: string]: any }): cockroach.sql.sqlbase.PartitioningDescriptor;
+
+                /**
+                 * Creates a plain object from a PartitioningDescriptor message. Also converts values to other types if specified.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor} message PartitioningDescriptor
+                 * @param {$protobuf.ConversionOptions} [options] Conversion options
+                 * @returns {Object.<string,*>} Plain object
+                 */
+                public static toObject(message: cockroach.sql.sqlbase.PartitioningDescriptor, options?: $protobuf.ConversionOptions): { [k: string]: any };
+
+                /**
+                 * Creates a plain object from this PartitioningDescriptor message. Also converts values to other types if specified.
+                 * @param {$protobuf.ConversionOptions} [options] Conversion options
+                 * @returns {Object.<string,*>} Plain object
+                 */
+                public toObject(options?: $protobuf.ConversionOptions): { [k: string]: any };
+
+                /**
+                 * Converts this PartitioningDescriptor to JSON.
+                 * @returns {Object.<string,*>} JSON object
+                 */
+                public toJSON(): { [k: string]: any };
+            }
+
+            namespace PartitioningDescriptor {
+
+                type List$Properties = {
+                    name?: string;
+                    values?: Uint8Array[];
+                };
+
+                /**
+                 * Constructs a new List.
+                 * @exports cockroach.sql.sqlbase.PartitioningDescriptor.List
+                 * @constructor
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties=} [properties] Properties to set
+                 */
+                class List {
+
+                    /**
+                     * Constructs a new List.
+                     * @exports cockroach.sql.sqlbase.PartitioningDescriptor.List
+                     * @constructor
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties=} [properties] Properties to set
+                     */
+                    constructor(properties?: cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties);
+
+                    /**
+                     * List name.
+                     * @type {string}
+                     */
+                    public name: string;
+
+                    /**
+                     * List values.
+                     * @type {Array.<Uint8Array>}
+                     */
+                    public values: Uint8Array[];
+
+                    /**
+                     * Creates a new List instance using the specified properties.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties=} [properties] Properties to set
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List instance
+                     */
+                    public static create(properties?: cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties): cockroach.sql.sqlbase.PartitioningDescriptor.List;
+
+                    /**
+                     * Encodes the specified List message. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.List.verify|verify} messages.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties} message List message or plain object to encode
+                     * @param {$protobuf.Writer} [writer] Writer to encode to
+                     * @returns {$protobuf.Writer} Writer
+                     */
+                    public static encode(message: cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties, writer?: $protobuf.Writer): $protobuf.Writer;
+
+                    /**
+                     * Encodes the specified List message, length delimited. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.List.verify|verify} messages.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties} message List message or plain object to encode
+                     * @param {$protobuf.Writer} [writer] Writer to encode to
+                     * @returns {$protobuf.Writer} Writer
+                     */
+                    public static encodeDelimited(message: cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties, writer?: $protobuf.Writer): $protobuf.Writer;
+
+                    /**
+                     * Decodes a List message from the specified reader or buffer.
+                     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                     * @param {number} [length] Message length if known beforehand
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     * @throws {Error} If the payload is not a reader or valid buffer
+                     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                     */
+                    public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): cockroach.sql.sqlbase.PartitioningDescriptor.List;
+
+                    /**
+                     * Decodes a List message from the specified reader or buffer, length delimited.
+                     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     * @throws {Error} If the payload is not a reader or valid buffer
+                     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                     */
+                    public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): cockroach.sql.sqlbase.PartitioningDescriptor.List;
+
+                    /**
+                     * Verifies a List message.
+                     * @param {Object.<string,*>} message Plain object to verify
+                     * @returns {?string} `null` if valid, otherwise the reason why it is not
+                     */
+                    public static verify(message: { [k: string]: any }): string;
+
+                    /**
+                     * Creates a List message from a plain object. Also converts values to their respective internal types.
+                     * @param {Object.<string,*>} object Plain object
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     */
+                    public static fromObject(object: { [k: string]: any }): cockroach.sql.sqlbase.PartitioningDescriptor.List;
+
+                    /**
+                     * Creates a List message from a plain object. Also converts values to their respective internal types.
+                     * This is an alias of {@link cockroach.sql.sqlbase.PartitioningDescriptor.List.fromObject}.
+                     * @function
+                     * @param {Object.<string,*>} object Plain object
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     */
+                    public static from(object: { [k: string]: any }): cockroach.sql.sqlbase.PartitioningDescriptor.List;
+
+                    /**
+                     * Creates a plain object from a List message. Also converts values to other types if specified.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List} message List
+                     * @param {$protobuf.ConversionOptions} [options] Conversion options
+                     * @returns {Object.<string,*>} Plain object
+                     */
+                    public static toObject(message: cockroach.sql.sqlbase.PartitioningDescriptor.List, options?: $protobuf.ConversionOptions): { [k: string]: any };
+
+                    /**
+                     * Creates a plain object from this List message. Also converts values to other types if specified.
+                     * @param {$protobuf.ConversionOptions} [options] Conversion options
+                     * @returns {Object.<string,*>} Plain object
+                     */
+                    public toObject(options?: $protobuf.ConversionOptions): { [k: string]: any };
+
+                    /**
+                     * Converts this List to JSON.
+                     * @returns {Object.<string,*>} JSON object
+                     */
+                    public toJSON(): { [k: string]: any };
                 }
             }
 

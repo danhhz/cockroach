@@ -26064,6 +26064,206 @@ export const cockroach = $root.cockroach = (() => {
             return Constraints;
         })();
 
+        config.PartitionSpan = (function() {
+
+            /**
+             * Properties of a PartitionSpan.
+             * @typedef cockroach.config.PartitionSpan$Properties
+             * @type {Object}
+             * @property {cockroach.roachpb.Span$Properties} [span] PartitionSpan span.
+             * @property {string} [partition] PartitionSpan partition.
+             */
+
+            /**
+             * Constructs a new PartitionSpan.
+             * @exports cockroach.config.PartitionSpan
+             * @constructor
+             * @param {cockroach.config.PartitionSpan$Properties=} [properties] Properties to set
+             */
+            function PartitionSpan(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null)
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * PartitionSpan span.
+             * @type {(cockroach.roachpb.Span$Properties|null)}
+             */
+            PartitionSpan.prototype.span = null;
+
+            /**
+             * PartitionSpan partition.
+             * @type {string}
+             */
+            PartitionSpan.prototype.partition = "";
+
+            /**
+             * Creates a new PartitionSpan instance using the specified properties.
+             * @param {cockroach.config.PartitionSpan$Properties=} [properties] Properties to set
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan instance
+             */
+            PartitionSpan.create = function create(properties) {
+                return new PartitionSpan(properties);
+            };
+
+            /**
+             * Encodes the specified PartitionSpan message. Does not implicitly {@link cockroach.config.PartitionSpan.verify|verify} messages.
+             * @param {cockroach.config.PartitionSpan$Properties} message PartitionSpan message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            PartitionSpan.encode = function encode(message, writer) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (message.span != null && message.hasOwnProperty("span"))
+                    $root.cockroach.roachpb.Span.encode(message.span, writer.uint32(/* id 1, wireType 2 =*/10).fork()).ldelim();
+                if (message.partition != null && message.hasOwnProperty("partition"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.partition);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified PartitionSpan message, length delimited. Does not implicitly {@link cockroach.config.PartitionSpan.verify|verify} messages.
+             * @param {cockroach.config.PartitionSpan$Properties} message PartitionSpan message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            PartitionSpan.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer).ldelim();
+            };
+
+            /**
+             * Decodes a PartitionSpan message from the specified reader or buffer.
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            PartitionSpan.decode = function decode(reader, length) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.cockroach.config.PartitionSpan();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    switch (tag >>> 3) {
+                    case 1:
+                        message.span = $root.cockroach.roachpb.Span.decode(reader, reader.uint32());
+                        break;
+                    case 2:
+                        message.partition = reader.string();
+                        break;
+                    default:
+                        reader.skipType(tag & 7);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a PartitionSpan message from the specified reader or buffer, length delimited.
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            PartitionSpan.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a PartitionSpan message.
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {?string} `null` if valid, otherwise the reason why it is not
+             */
+            PartitionSpan.verify = function verify(message) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (message.span != null && message.hasOwnProperty("span")) {
+                    let error = $root.cockroach.roachpb.Span.verify(message.span);
+                    if (error)
+                        return "span." + error;
+                }
+                if (message.partition != null && message.hasOwnProperty("partition"))
+                    if (!$util.isString(message.partition))
+                        return "partition: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a PartitionSpan message from a plain object. Also converts values to their respective internal types.
+             * @param {Object.<string,*>} object Plain object
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             */
+            PartitionSpan.fromObject = function fromObject(object) {
+                if (object instanceof $root.cockroach.config.PartitionSpan)
+                    return object;
+                let message = new $root.cockroach.config.PartitionSpan();
+                if (object.span != null) {
+                    if (typeof object.span !== "object")
+                        throw TypeError(".cockroach.config.PartitionSpan.span: object expected");
+                    message.span = $root.cockroach.roachpb.Span.fromObject(object.span);
+                }
+                if (object.partition != null)
+                    message.partition = String(object.partition);
+                return message;
+            };
+
+            /**
+             * Creates a PartitionSpan message from a plain object. Also converts values to their respective internal types.
+             * This is an alias of {@link cockroach.config.PartitionSpan.fromObject}.
+             * @function
+             * @param {Object.<string,*>} object Plain object
+             * @returns {cockroach.config.PartitionSpan} PartitionSpan
+             */
+            PartitionSpan.from = PartitionSpan.fromObject;
+
+            /**
+             * Creates a plain object from a PartitionSpan message. Also converts values to other types if specified.
+             * @param {cockroach.config.PartitionSpan} message PartitionSpan
+             * @param {$protobuf.ConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            PartitionSpan.toObject = function toObject(message, options) {
+                if (!options)
+                    options = {};
+                let object = {};
+                if (options.defaults) {
+                    object.span = null;
+                    object.partition = "";
+                }
+                if (message.span != null && message.hasOwnProperty("span"))
+                    object.span = $root.cockroach.roachpb.Span.toObject(message.span, options);
+                if (message.partition != null && message.hasOwnProperty("partition"))
+                    object.partition = message.partition;
+                return object;
+            };
+
+            /**
+             * Creates a plain object from this PartitionSpan message. Also converts values to other types if specified.
+             * @param {$protobuf.ConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            PartitionSpan.prototype.toObject = function toObject(options) {
+                return this.constructor.toObject(this, options);
+            };
+
+            /**
+             * Converts this PartitionSpan to JSON.
+             * @returns {Object.<string,*>} JSON object
+             */
+            PartitionSpan.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            return PartitionSpan;
+        })();
+
         config.ZoneConfig = (function() {
 
             /**
@@ -26076,6 +26276,8 @@ export const cockroach = $root.cockroach = (() => {
              * @property {cockroach.config.GCPolicy$Properties} [gc] ZoneConfig gc.
              * @property {number} [num_replicas] ZoneConfig num_replicas.
              * @property {cockroach.config.Constraints$Properties} [constraints] ZoneConfig constraints.
+             * @property {Array.<cockroach.config.PartitionSpan$Properties>} [partition_spans] ZoneConfig partition_spans.
+             * @property {Object.<string,cockroach.config.ZoneConfig$Properties>} [partition_zones] ZoneConfig partition_zones.
              */
 
             /**
@@ -26086,6 +26288,8 @@ export const cockroach = $root.cockroach = (() => {
              */
             function ZoneConfig(properties) {
                 this.replica_attrs = [];
+                this.partition_spans = [];
+                this.partition_zones = {};
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null)
@@ -26129,6 +26333,18 @@ export const cockroach = $root.cockroach = (() => {
             ZoneConfig.prototype.constraints = null;
 
             /**
+             * ZoneConfig partition_spans.
+             * @type {Array.<cockroach.config.PartitionSpan$Properties>}
+             */
+            ZoneConfig.prototype.partition_spans = $util.emptyArray;
+
+            /**
+             * ZoneConfig partition_zones.
+             * @type {Object.<string,cockroach.config.ZoneConfig$Properties>}
+             */
+            ZoneConfig.prototype.partition_zones = $util.emptyObject;
+
+            /**
              * Creates a new ZoneConfig instance using the specified properties.
              * @param {cockroach.config.ZoneConfig$Properties=} [properties] Properties to set
              * @returns {cockroach.config.ZoneConfig} ZoneConfig instance
@@ -26159,6 +26375,14 @@ export const cockroach = $root.cockroach = (() => {
                     writer.uint32(/* id 5, wireType 0 =*/40).int32(message.num_replicas);
                 if (message.constraints != null && message.hasOwnProperty("constraints"))
                     $root.cockroach.config.Constraints.encode(message.constraints, writer.uint32(/* id 6, wireType 2 =*/50).fork()).ldelim();
+                if (message.partition_spans != null && message.partition_spans.length)
+                    for (let i = 0; i < message.partition_spans.length; ++i)
+                        $root.cockroach.config.PartitionSpan.encode(message.partition_spans[i], writer.uint32(/* id 7, wireType 2 =*/58).fork()).ldelim();
+                if (message.partition_zones != null && message.hasOwnProperty("partition_zones"))
+                    for (let keys = Object.keys(message.partition_zones), i = 0; i < keys.length; ++i) {
+                        writer.uint32(/* id 8, wireType 2 =*/66).fork().uint32(/* id 1, wireType 2 =*/10).string(keys[i]);
+                        $root.cockroach.config.ZoneConfig.encode(message.partition_zones[keys[i]], writer.uint32(/* id 2, wireType 2 =*/18).fork()).ldelim().ldelim();
+                    }
                 return writer;
             };
 
@@ -26183,7 +26407,7 @@ export const cockroach = $root.cockroach = (() => {
             ZoneConfig.decode = function decode(reader, length) {
                 if (!(reader instanceof $Reader))
                     reader = $Reader.create(reader);
-                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.cockroach.config.ZoneConfig();
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.cockroach.config.ZoneConfig(), key;
                 while (reader.pos < end) {
                     let tag = reader.uint32();
                     switch (tag >>> 3) {
@@ -26206,6 +26430,19 @@ export const cockroach = $root.cockroach = (() => {
                         break;
                     case 6:
                         message.constraints = $root.cockroach.config.Constraints.decode(reader, reader.uint32());
+                        break;
+                    case 7:
+                        if (!(message.partition_spans && message.partition_spans.length))
+                            message.partition_spans = [];
+                        message.partition_spans.push($root.cockroach.config.PartitionSpan.decode(reader, reader.uint32()));
+                        break;
+                    case 8:
+                        reader.skip().pos++;
+                        if (message.partition_zones === $util.emptyObject)
+                            message.partition_zones = {};
+                        key = reader.string();
+                        reader.pos++;
+                        message.partition_zones[key] = $root.cockroach.config.ZoneConfig.decode(reader, reader.uint32());
                         break;
                     default:
                         reader.skipType(tag & 7);
@@ -26264,6 +26501,25 @@ export const cockroach = $root.cockroach = (() => {
                     if (error)
                         return "constraints." + error;
                 }
+                if (message.partition_spans != null && message.hasOwnProperty("partition_spans")) {
+                    if (!Array.isArray(message.partition_spans))
+                        return "partition_spans: array expected";
+                    for (let i = 0; i < message.partition_spans.length; ++i) {
+                        let error = $root.cockroach.config.PartitionSpan.verify(message.partition_spans[i]);
+                        if (error)
+                            return "partition_spans." + error;
+                    }
+                }
+                if (message.partition_zones != null && message.hasOwnProperty("partition_zones")) {
+                    if (!$util.isObject(message.partition_zones))
+                        return "partition_zones: object expected";
+                    let key = Object.keys(message.partition_zones);
+                    for (let i = 0; i < key.length; ++i) {
+                        let error = $root.cockroach.config.ZoneConfig.verify(message.partition_zones[key[i]]);
+                        if (error)
+                            return "partition_zones." + error;
+                    }
+                }
                 return null;
             };
 
@@ -26316,6 +26572,26 @@ export const cockroach = $root.cockroach = (() => {
                         throw TypeError(".cockroach.config.ZoneConfig.constraints: object expected");
                     message.constraints = $root.cockroach.config.Constraints.fromObject(object.constraints);
                 }
+                if (object.partition_spans) {
+                    if (!Array.isArray(object.partition_spans))
+                        throw TypeError(".cockroach.config.ZoneConfig.partition_spans: array expected");
+                    message.partition_spans = [];
+                    for (let i = 0; i < object.partition_spans.length; ++i) {
+                        if (typeof object.partition_spans[i] !== "object")
+                            throw TypeError(".cockroach.config.ZoneConfig.partition_spans: object expected");
+                        message.partition_spans[i] = $root.cockroach.config.PartitionSpan.fromObject(object.partition_spans[i]);
+                    }
+                }
+                if (object.partition_zones) {
+                    if (typeof object.partition_zones !== "object")
+                        throw TypeError(".cockroach.config.ZoneConfig.partition_zones: object expected");
+                    message.partition_zones = {};
+                    for (let keys = Object.keys(object.partition_zones), i = 0; i < keys.length; ++i) {
+                        if (typeof object.partition_zones[keys[i]] !== "object")
+                            throw TypeError(".cockroach.config.ZoneConfig.partition_zones: object expected");
+                        message.partition_zones[keys[i]] = $root.cockroach.config.ZoneConfig.fromObject(object.partition_zones[keys[i]]);
+                    }
+                }
                 return message;
             };
 
@@ -26338,8 +26614,12 @@ export const cockroach = $root.cockroach = (() => {
                 if (!options)
                     options = {};
                 let object = {};
-                if (options.arrays || options.defaults)
+                if (options.arrays || options.defaults) {
                     object.replica_attrs = [];
+                    object.partition_spans = [];
+                }
+                if (options.objects || options.defaults)
+                    object.partition_zones = {};
                 if (options.defaults) {
                     if ($util.Long) {
                         let long = new $util.Long(0, 0, false);
@@ -26376,6 +26656,17 @@ export const cockroach = $root.cockroach = (() => {
                     object.num_replicas = message.num_replicas;
                 if (message.constraints != null && message.hasOwnProperty("constraints"))
                     object.constraints = $root.cockroach.config.Constraints.toObject(message.constraints, options);
+                if (message.partition_spans && message.partition_spans.length) {
+                    object.partition_spans = [];
+                    for (let j = 0; j < message.partition_spans.length; ++j)
+                        object.partition_spans[j] = $root.cockroach.config.PartitionSpan.toObject(message.partition_spans[j], options);
+                }
+                let keys2;
+                if (message.partition_zones && (keys2 = Object.keys(message.partition_zones)).length) {
+                    object.partition_zones = {};
+                    for (let j = 0; j < keys2.length; ++j)
+                        object.partition_zones[keys2[j]] = $root.cockroach.config.ZoneConfig.toObject(message.partition_zones[keys2[j]], options);
+                }
                 return object;
             };
 
@@ -42926,6 +43217,7 @@ export const cockroach = $root.cockroach = (() => {
                  * @property {Array.<cockroach.sql.sqlbase.ForeignKeyReference$Properties>} [referenced_by] IndexDescriptor referenced_by.
                  * @property {cockroach.sql.sqlbase.InterleaveDescriptor$Properties} [interleave] IndexDescriptor interleave.
                  * @property {Array.<cockroach.sql.sqlbase.ForeignKeyReference$Properties>} [interleaved_by] IndexDescriptor interleaved_by.
+                 * @property {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} [partitioning] IndexDescriptor partitioning.
                  */
 
                 /**
@@ -43035,6 +43327,12 @@ export const cockroach = $root.cockroach = (() => {
                 IndexDescriptor.prototype.interleaved_by = $util.emptyArray;
 
                 /**
+                 * IndexDescriptor partitioning.
+                 * @type {(cockroach.sql.sqlbase.PartitioningDescriptor$Properties|null)}
+                 */
+                IndexDescriptor.prototype.partitioning = null;
+
+                /**
                  * Creates a new IndexDescriptor instance using the specified properties.
                  * @param {cockroach.sql.sqlbase.IndexDescriptor$Properties=} [properties] Properties to set
                  * @returns {cockroach.sql.sqlbase.IndexDescriptor} IndexDescriptor instance
@@ -43089,6 +43387,8 @@ export const cockroach = $root.cockroach = (() => {
                     if (message.store_column_ids != null && message.store_column_ids.length)
                         for (let i = 0; i < message.store_column_ids.length; ++i)
                             writer.uint32(/* id 14, wireType 0 =*/112).uint32(message.store_column_ids[i]);
+                    if (message.partitioning != null && message.hasOwnProperty("partitioning"))
+                        $root.cockroach.sql.sqlbase.PartitioningDescriptor.encode(message.partitioning, writer.uint32(/* id 15, wireType 2 =*/122).fork()).ldelim();
                     return writer;
                 };
 
@@ -43201,6 +43501,9 @@ export const cockroach = $root.cockroach = (() => {
                             if (!(message.interleaved_by && message.interleaved_by.length))
                                 message.interleaved_by = [];
                             message.interleaved_by.push($root.cockroach.sql.sqlbase.ForeignKeyReference.decode(reader, reader.uint32()));
+                            break;
+                        case 15:
+                            message.partitioning = $root.cockroach.sql.sqlbase.PartitioningDescriptor.decode(reader, reader.uint32());
                             break;
                         default:
                             reader.skipType(tag & 7);
@@ -43322,6 +43625,11 @@ export const cockroach = $root.cockroach = (() => {
                                 return "interleaved_by." + error;
                         }
                     }
+                    if (message.partitioning != null && message.hasOwnProperty("partitioning")) {
+                        let error = $root.cockroach.sql.sqlbase.PartitioningDescriptor.verify(message.partitioning);
+                        if (error)
+                            return "partitioning." + error;
+                    }
                     return null;
                 };
 
@@ -43429,6 +43737,11 @@ export const cockroach = $root.cockroach = (() => {
                             message.interleaved_by[i] = $root.cockroach.sql.sqlbase.ForeignKeyReference.fromObject(object.interleaved_by[i]);
                         }
                     }
+                    if (object.partitioning != null) {
+                        if (typeof object.partitioning !== "object")
+                            throw TypeError(".cockroach.sql.sqlbase.IndexDescriptor.partitioning: object expected");
+                        message.partitioning = $root.cockroach.sql.sqlbase.PartitioningDescriptor.fromObject(object.partitioning);
+                    }
                     return message;
                 };
 
@@ -43468,6 +43781,7 @@ export const cockroach = $root.cockroach = (() => {
                         object.unique = false;
                         object.foreign_key = null;
                         object.interleave = null;
+                        object.partitioning = null;
                     }
                     if (message.name != null && message.hasOwnProperty("name"))
                         object.name = message.name;
@@ -43524,6 +43838,8 @@ export const cockroach = $root.cockroach = (() => {
                         for (let j = 0; j < message.store_column_ids.length; ++j)
                             object.store_column_ids[j] = message.store_column_ids[j];
                     }
+                    if (message.partitioning != null && message.hasOwnProperty("partitioning"))
+                        object.partitioning = $root.cockroach.sql.sqlbase.PartitioningDescriptor.toObject(message.partitioning, options);
                     return object;
                 };
 
@@ -43560,6 +43876,436 @@ export const cockroach = $root.cockroach = (() => {
                 })();
 
                 return IndexDescriptor;
+            })();
+
+            sqlbase.PartitioningDescriptor = (function() {
+
+                /**
+                 * Properties of a PartitioningDescriptor.
+                 * @typedef cockroach.sql.sqlbase.PartitioningDescriptor$Properties
+                 * @type {Object}
+                 * @property {number} [num_columns] PartitioningDescriptor num_columns.
+                 * @property {Array.<cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties>} [list] PartitioningDescriptor list.
+                 */
+
+                /**
+                 * Constructs a new PartitioningDescriptor.
+                 * @exports cockroach.sql.sqlbase.PartitioningDescriptor
+                 * @constructor
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties=} [properties] Properties to set
+                 */
+                function PartitioningDescriptor(properties) {
+                    this.list = [];
+                    if (properties)
+                        for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                            if (properties[keys[i]] != null)
+                                this[keys[i]] = properties[keys[i]];
+                }
+
+                /**
+                 * PartitioningDescriptor num_columns.
+                 * @type {number}
+                 */
+                PartitioningDescriptor.prototype.num_columns = 0;
+
+                /**
+                 * PartitioningDescriptor list.
+                 * @type {Array.<cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties>}
+                 */
+                PartitioningDescriptor.prototype.list = $util.emptyArray;
+
+                /**
+                 * Creates a new PartitioningDescriptor instance using the specified properties.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties=} [properties] Properties to set
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor instance
+                 */
+                PartitioningDescriptor.create = function create(properties) {
+                    return new PartitioningDescriptor(properties);
+                };
+
+                /**
+                 * Encodes the specified PartitioningDescriptor message. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.verify|verify} messages.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} message PartitioningDescriptor message or plain object to encode
+                 * @param {$protobuf.Writer} [writer] Writer to encode to
+                 * @returns {$protobuf.Writer} Writer
+                 */
+                PartitioningDescriptor.encode = function encode(message, writer) {
+                    if (!writer)
+                        writer = $Writer.create();
+                    if (message.num_columns != null && message.hasOwnProperty("num_columns"))
+                        writer.uint32(/* id 1, wireType 0 =*/8).uint32(message.num_columns);
+                    if (message.list != null && message.list.length)
+                        for (let i = 0; i < message.list.length; ++i)
+                            $root.cockroach.sql.sqlbase.PartitioningDescriptor.List.encode(message.list[i], writer.uint32(/* id 2, wireType 2 =*/18).fork()).ldelim();
+                    return writer;
+                };
+
+                /**
+                 * Encodes the specified PartitioningDescriptor message, length delimited. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.verify|verify} messages.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} message PartitioningDescriptor message or plain object to encode
+                 * @param {$protobuf.Writer} [writer] Writer to encode to
+                 * @returns {$protobuf.Writer} Writer
+                 */
+                PartitioningDescriptor.encodeDelimited = function encodeDelimited(message, writer) {
+                    return this.encode(message, writer).ldelim();
+                };
+
+                /**
+                 * Decodes a PartitioningDescriptor message from the specified reader or buffer.
+                 * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                 * @param {number} [length] Message length if known beforehand
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 * @throws {Error} If the payload is not a reader or valid buffer
+                 * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                 */
+                PartitioningDescriptor.decode = function decode(reader, length) {
+                    if (!(reader instanceof $Reader))
+                        reader = $Reader.create(reader);
+                    let end = length === undefined ? reader.len : reader.pos + length, message = new $root.cockroach.sql.sqlbase.PartitioningDescriptor();
+                    while (reader.pos < end) {
+                        let tag = reader.uint32();
+                        switch (tag >>> 3) {
+                        case 1:
+                            message.num_columns = reader.uint32();
+                            break;
+                        case 2:
+                            if (!(message.list && message.list.length))
+                                message.list = [];
+                            message.list.push($root.cockroach.sql.sqlbase.PartitioningDescriptor.List.decode(reader, reader.uint32()));
+                            break;
+                        default:
+                            reader.skipType(tag & 7);
+                            break;
+                        }
+                    }
+                    return message;
+                };
+
+                /**
+                 * Decodes a PartitioningDescriptor message from the specified reader or buffer, length delimited.
+                 * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 * @throws {Error} If the payload is not a reader or valid buffer
+                 * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                 */
+                PartitioningDescriptor.decodeDelimited = function decodeDelimited(reader) {
+                    if (!(reader instanceof $Reader))
+                        reader = $Reader(reader);
+                    return this.decode(reader, reader.uint32());
+                };
+
+                /**
+                 * Verifies a PartitioningDescriptor message.
+                 * @param {Object.<string,*>} message Plain object to verify
+                 * @returns {?string} `null` if valid, otherwise the reason why it is not
+                 */
+                PartitioningDescriptor.verify = function verify(message) {
+                    if (typeof message !== "object" || message === null)
+                        return "object expected";
+                    if (message.num_columns != null && message.hasOwnProperty("num_columns"))
+                        if (!$util.isInteger(message.num_columns))
+                            return "num_columns: integer expected";
+                    if (message.list != null && message.hasOwnProperty("list")) {
+                        if (!Array.isArray(message.list))
+                            return "list: array expected";
+                        for (let i = 0; i < message.list.length; ++i) {
+                            let error = $root.cockroach.sql.sqlbase.PartitioningDescriptor.List.verify(message.list[i]);
+                            if (error)
+                                return "list." + error;
+                        }
+                    }
+                    return null;
+                };
+
+                /**
+                 * Creates a PartitioningDescriptor message from a plain object. Also converts values to their respective internal types.
+                 * @param {Object.<string,*>} object Plain object
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 */
+                PartitioningDescriptor.fromObject = function fromObject(object) {
+                    if (object instanceof $root.cockroach.sql.sqlbase.PartitioningDescriptor)
+                        return object;
+                    let message = new $root.cockroach.sql.sqlbase.PartitioningDescriptor();
+                    if (object.num_columns != null)
+                        message.num_columns = object.num_columns >>> 0;
+                    if (object.list) {
+                        if (!Array.isArray(object.list))
+                            throw TypeError(".cockroach.sql.sqlbase.PartitioningDescriptor.list: array expected");
+                        message.list = [];
+                        for (let i = 0; i < object.list.length; ++i) {
+                            if (typeof object.list[i] !== "object")
+                                throw TypeError(".cockroach.sql.sqlbase.PartitioningDescriptor.list: object expected");
+                            message.list[i] = $root.cockroach.sql.sqlbase.PartitioningDescriptor.List.fromObject(object.list[i]);
+                        }
+                    }
+                    return message;
+                };
+
+                /**
+                 * Creates a PartitioningDescriptor message from a plain object. Also converts values to their respective internal types.
+                 * This is an alias of {@link cockroach.sql.sqlbase.PartitioningDescriptor.fromObject}.
+                 * @function
+                 * @param {Object.<string,*>} object Plain object
+                 * @returns {cockroach.sql.sqlbase.PartitioningDescriptor} PartitioningDescriptor
+                 */
+                PartitioningDescriptor.from = PartitioningDescriptor.fromObject;
+
+                /**
+                 * Creates a plain object from a PartitioningDescriptor message. Also converts values to other types if specified.
+                 * @param {cockroach.sql.sqlbase.PartitioningDescriptor} message PartitioningDescriptor
+                 * @param {$protobuf.ConversionOptions} [options] Conversion options
+                 * @returns {Object.<string,*>} Plain object
+                 */
+                PartitioningDescriptor.toObject = function toObject(message, options) {
+                    if (!options)
+                        options = {};
+                    let object = {};
+                    if (options.arrays || options.defaults)
+                        object.list = [];
+                    if (options.defaults)
+                        object.num_columns = 0;
+                    if (message.num_columns != null && message.hasOwnProperty("num_columns"))
+                        object.num_columns = message.num_columns;
+                    if (message.list && message.list.length) {
+                        object.list = [];
+                        for (let j = 0; j < message.list.length; ++j)
+                            object.list[j] = $root.cockroach.sql.sqlbase.PartitioningDescriptor.List.toObject(message.list[j], options);
+                    }
+                    return object;
+                };
+
+                /**
+                 * Creates a plain object from this PartitioningDescriptor message. Also converts values to other types if specified.
+                 * @param {$protobuf.ConversionOptions} [options] Conversion options
+                 * @returns {Object.<string,*>} Plain object
+                 */
+                PartitioningDescriptor.prototype.toObject = function toObject(options) {
+                    return this.constructor.toObject(this, options);
+                };
+
+                /**
+                 * Converts this PartitioningDescriptor to JSON.
+                 * @returns {Object.<string,*>} JSON object
+                 */
+                PartitioningDescriptor.prototype.toJSON = function toJSON() {
+                    return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+                };
+
+                PartitioningDescriptor.List = (function() {
+
+                    /**
+                     * Properties of a List.
+                     * @typedef cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties
+                     * @type {Object}
+                     * @property {string} [name] List name.
+                     * @property {Array.<Uint8Array>} [values] List values.
+                     */
+
+                    /**
+                     * Constructs a new List.
+                     * @exports cockroach.sql.sqlbase.PartitioningDescriptor.List
+                     * @constructor
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties=} [properties] Properties to set
+                     */
+                    function List(properties) {
+                        this.values = [];
+                        if (properties)
+                            for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                                if (properties[keys[i]] != null)
+                                    this[keys[i]] = properties[keys[i]];
+                    }
+
+                    /**
+                     * List name.
+                     * @type {string}
+                     */
+                    List.prototype.name = "";
+
+                    /**
+                     * List values.
+                     * @type {Array.<Uint8Array>}
+                     */
+                    List.prototype.values = $util.emptyArray;
+
+                    /**
+                     * Creates a new List instance using the specified properties.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties=} [properties] Properties to set
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List instance
+                     */
+                    List.create = function create(properties) {
+                        return new List(properties);
+                    };
+
+                    /**
+                     * Encodes the specified List message. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.List.verify|verify} messages.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties} message List message or plain object to encode
+                     * @param {$protobuf.Writer} [writer] Writer to encode to
+                     * @returns {$protobuf.Writer} Writer
+                     */
+                    List.encode = function encode(message, writer) {
+                        if (!writer)
+                            writer = $Writer.create();
+                        if (message.name != null && message.hasOwnProperty("name"))
+                            writer.uint32(/* id 1, wireType 2 =*/10).string(message.name);
+                        if (message.values != null && message.values.length)
+                            for (let i = 0; i < message.values.length; ++i)
+                                writer.uint32(/* id 2, wireType 2 =*/18).bytes(message.values[i]);
+                        return writer;
+                    };
+
+                    /**
+                     * Encodes the specified List message, length delimited. Does not implicitly {@link cockroach.sql.sqlbase.PartitioningDescriptor.List.verify|verify} messages.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties} message List message or plain object to encode
+                     * @param {$protobuf.Writer} [writer] Writer to encode to
+                     * @returns {$protobuf.Writer} Writer
+                     */
+                    List.encodeDelimited = function encodeDelimited(message, writer) {
+                        return this.encode(message, writer).ldelim();
+                    };
+
+                    /**
+                     * Decodes a List message from the specified reader or buffer.
+                     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                     * @param {number} [length] Message length if known beforehand
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     * @throws {Error} If the payload is not a reader or valid buffer
+                     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                     */
+                    List.decode = function decode(reader, length) {
+                        if (!(reader instanceof $Reader))
+                            reader = $Reader.create(reader);
+                        let end = length === undefined ? reader.len : reader.pos + length, message = new $root.cockroach.sql.sqlbase.PartitioningDescriptor.List();
+                        while (reader.pos < end) {
+                            let tag = reader.uint32();
+                            switch (tag >>> 3) {
+                            case 1:
+                                message.name = reader.string();
+                                break;
+                            case 2:
+                                if (!(message.values && message.values.length))
+                                    message.values = [];
+                                message.values.push(reader.bytes());
+                                break;
+                            default:
+                                reader.skipType(tag & 7);
+                                break;
+                            }
+                        }
+                        return message;
+                    };
+
+                    /**
+                     * Decodes a List message from the specified reader or buffer, length delimited.
+                     * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     * @throws {Error} If the payload is not a reader or valid buffer
+                     * @throws {$protobuf.util.ProtocolError} If required fields are missing
+                     */
+                    List.decodeDelimited = function decodeDelimited(reader) {
+                        if (!(reader instanceof $Reader))
+                            reader = $Reader(reader);
+                        return this.decode(reader, reader.uint32());
+                    };
+
+                    /**
+                     * Verifies a List message.
+                     * @param {Object.<string,*>} message Plain object to verify
+                     * @returns {?string} `null` if valid, otherwise the reason why it is not
+                     */
+                    List.verify = function verify(message) {
+                        if (typeof message !== "object" || message === null)
+                            return "object expected";
+                        if (message.name != null && message.hasOwnProperty("name"))
+                            if (!$util.isString(message.name))
+                                return "name: string expected";
+                        if (message.values != null && message.hasOwnProperty("values")) {
+                            if (!Array.isArray(message.values))
+                                return "values: array expected";
+                            for (let i = 0; i < message.values.length; ++i)
+                                if (!(message.values[i] && typeof message.values[i].length === "number" || $util.isString(message.values[i])))
+                                    return "values: buffer[] expected";
+                        }
+                        return null;
+                    };
+
+                    /**
+                     * Creates a List message from a plain object. Also converts values to their respective internal types.
+                     * @param {Object.<string,*>} object Plain object
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     */
+                    List.fromObject = function fromObject(object) {
+                        if (object instanceof $root.cockroach.sql.sqlbase.PartitioningDescriptor.List)
+                            return object;
+                        let message = new $root.cockroach.sql.sqlbase.PartitioningDescriptor.List();
+                        if (object.name != null)
+                            message.name = String(object.name);
+                        if (object.values) {
+                            if (!Array.isArray(object.values))
+                                throw TypeError(".cockroach.sql.sqlbase.PartitioningDescriptor.List.values: array expected");
+                            message.values = [];
+                            for (let i = 0; i < object.values.length; ++i)
+                                if (typeof object.values[i] === "string")
+                                    $util.base64.decode(object.values[i], message.values[i] = $util.newBuffer($util.base64.length(object.values[i])), 0);
+                                else if (object.values[i].length)
+                                    message.values[i] = object.values[i];
+                        }
+                        return message;
+                    };
+
+                    /**
+                     * Creates a List message from a plain object. Also converts values to their respective internal types.
+                     * This is an alias of {@link cockroach.sql.sqlbase.PartitioningDescriptor.List.fromObject}.
+                     * @function
+                     * @param {Object.<string,*>} object Plain object
+                     * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List
+                     */
+                    List.from = List.fromObject;
+
+                    /**
+                     * Creates a plain object from a List message. Also converts values to other types if specified.
+                     * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List} message List
+                     * @param {$protobuf.ConversionOptions} [options] Conversion options
+                     * @returns {Object.<string,*>} Plain object
+                     */
+                    List.toObject = function toObject(message, options) {
+                        if (!options)
+                            options = {};
+                        let object = {};
+                        if (options.arrays || options.defaults)
+                            object.values = [];
+                        if (options.defaults)
+                            object.name = "";
+                        if (message.name != null && message.hasOwnProperty("name"))
+                            object.name = message.name;
+                        if (message.values && message.values.length) {
+                            object.values = [];
+                            for (let j = 0; j < message.values.length; ++j)
+                                object.values[j] = options.bytes === String ? $util.base64.encode(message.values[j], 0, message.values[j].length) : options.bytes === Array ? Array.prototype.slice.call(message.values[j]) : message.values[j];
+                        }
+                        return object;
+                    };
+
+                    /**
+                     * Creates a plain object from this List message. Also converts values to other types if specified.
+                     * @param {$protobuf.ConversionOptions} [options] Conversion options
+                     * @returns {Object.<string,*>} Plain object
+                     */
+                    List.prototype.toObject = function toObject(options) {
+                        return this.constructor.toObject(this, options);
+                    };
+
+                    /**
+                     * Converts this List to JSON.
+                     * @returns {Object.<string,*>} JSON object
+                     */
+                    List.prototype.toJSON = function toJSON() {
+                        return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+                    };
+
+                    return List;
+                })();
+
+                return PartitioningDescriptor;
             })();
 
             sqlbase.DescriptorMutation = (function() {

@@ -1,0 +1,19 @@
+# LogicTest: default
+
+statement ok
+CREATE TABLE users (
+  id SERIAL, country STRING, email STRING, PRIMARY KEY (country, id)
+) PARTITION BY LIST (country) (
+  PARTITION north_america VALUES ('US')
+)
+
+query TT
+SHOW CREATE TABLE users
+----
+users CREATE TABLE users (
+      id INT NOT NULL DEFAULT unique_rowid(),
+      country STRING NOT NULL,
+      email STRING NULL,
+      CONSTRAINT "primary" PRIMARY KEY (country ASC, id ASC),
+      FAMILY "primary" (id, country, email)
+) PARTITION BY LIST (country) ()

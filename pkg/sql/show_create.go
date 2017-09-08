@@ -135,6 +135,10 @@ func (p *planner) showCreateTable(
 		return "", err
 	}
 
+	if err := showCreatePartitioning(desc, &desc.PrimaryIndex, &buf); err != nil {
+		return "", err
+	}
+
 	return buf.String(), nil
 }
 
@@ -179,5 +183,33 @@ func (p *planner) showCreateInterleave(
 	}
 	interleavedColumnNames := quoteNames(idx.ColumnNames[:sharedPrefixLen]...)
 	fmt.Fprintf(buf, " INTERLEAVE IN PARENT %s (%s)", &parentName, interleavedColumnNames)
+	return nil
+}
+
+func showCreatePartitioning(
+	desc *sqlbase.TableDescriptor, idx *sqlbase.IndexDescriptor, buf *bytes.Buffer,
+) error {
+	if idx.Partitioning.NumColumns == 0 {
+		return nil
+	}
+	fmt.Fprintf(buf, " PARTITION BY LIST (")
+	for i := 0; i < int(idx.Partitioning.NumColumns); i++ {
+		if i != 0 {
+			fmt.Printf(", ")
+		}
+		fmt.Fprintf(buf, idx.ColumnNames[i])
+	}
+	fmt.Fprintf(buf, ") (")
+	for i, part := range idx.Partitioning.List {
+		if i != 0 {
+			fmt.Printf(", ")
+		}
+		fmt.Fprintf(buf, "PARTITION ")
+		fmt.Fprintf(buf, part.Name)
+		fmt.Fprintf(buf, "(")
+		// TODO(dan): Print the values.
+		fmt.Fprintf(buf, ")")
+	}
+	fmt.Fprintf(buf, ")")
 	return nil
 }

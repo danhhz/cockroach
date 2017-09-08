@@ -1115,6 +1115,36 @@ func (p *planner) finalizeInterleave(
 	return nil
 }
 
+func addPartitionedBy(
+	ctx context.Context,
+	desc *sqlbase.TableDescriptor,
+	index *sqlbase.IndexDescriptor,
+	part *parser.PartitionBy,
+	evalCtx *parser.EvalContext,
+) error {
+	switch part.Typ {
+	case parser.PartitionByList:
+	default:
+		return errors.Errorf("unsupported PARTITION BY: %s", part.Typ)
+	}
+
+	// TODO(dan): Validate part.Fields against the index columns.
+
+	index.Partitioning = sqlbase.PartitioningDescriptor{
+		NumColumns: uint32(len(part.Fields)),
+	}
+
+	for _, partition := range part.Partitions {
+		rows, err := evalCtx.Planner.QueryRow(ctx, partition.Values.String())
+		if err != nil {
+			return err
+		}
+		log.Info(ctx, rows)
+	}
+
+	return nil
+}
+
 func initTableDescriptor(
 	id, parentID sqlbase.ID,
 	name string,
@@ -1338,6 +1368,12 @@ func MakeTableDesc(
 
 	if n.Interleave != nil {
 		if err := addInterleave(ctx, txn, vt, &desc, &desc.PrimaryIndex, n.Interleave, sessionDB); err != nil {
+			return desc, err
+		}
+	}
+
+	if n.PartitionBy != nil {
+		if err := addPartitionedBy(ctx, &desc, &desc.PrimaryIndex, n.PartitionBy, evalCtx); err != nil {
 			return desc, err
 		}
 	}
