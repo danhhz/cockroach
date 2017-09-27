@@ -671,15 +671,26 @@ func (node *PartitionBy) Format(buf *bytes.Buffer, f FmtFlags) {
 // Partition TODO(dan)
 type Partition struct {
 	Name   UnresolvedName
-	Values SelectStatement
+	Values []*Tuple
+	// TODO(dan): PartitionByType here is pretty hacky
+	Typ PartitionByType
 }
 
 // Format implements the NodeFormatter interface.
 func (node Partition) Format(buf *bytes.Buffer, f FmtFlags) {
 	buf.WriteString(`PARTITION `)
 	FormatNode(buf, f, node.Name)
+	// TODO(dan): this is pretty hacky
+	if node.Typ == PartitionByRange {
+		buf.WriteString(` VALUES LESS THAN`)
+	}
 	buf.WriteString(` `)
-	FormatNode(buf, f, node.Values)
+	for i, n := range node.Values {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		FormatNode(buf, f, n)
+	}
 }
 
 // CreateTable represents a CREATE TABLE statement.

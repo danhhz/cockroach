@@ -349,7 +349,7 @@ func (u *sqlSymUnion) transactionModes() TransactionModes {
 func (u *sqlSymUnion) partitionBy() *PartitionBy {
     return u.val.(*PartitionBy)
 }
-func (u *sqlSymUnion) partitionList() []Partition {
+func (u *sqlSymUnion) partitions() []Partition {
     return u.val.([]Partition)
 }
 func (u *sqlSymUnion) partition() Partition {
@@ -415,7 +415,7 @@ func (u *sqlSymUnion) partition() Partition {
 %token <str>   KEY KEYS KV
 
 %token <str>   LATERAL LC_CTYPE LC_COLLATE
-%token <str>   LEADING LEAST LEFT LEVEL LIKE LIMIT LIST LOCAL
+%token <str>   LEADING LEAST LEFT LESS LEVEL LIKE LIMIT LIST LOCAL
 %token <str>   LOCALTIME LOCALTIMESTAMP LOW LSHIFT
 
 %token <str>   MATCH MINUTE MONTH
@@ -444,7 +444,7 @@ func (u *sqlSymUnion) partition() Partition {
 %token <str>   START STATUS STDIN STRICT STRING STORE STORING SUBSTRING
 %token <str>   SYMMETRIC SYSTEM
 
-%token <str>   TABLE TABLES TEMP TEMPLATE TEMPORARY TESTING_RANGES TESTING_RELOCATE TEXT THEN
+%token <str>   TABLE TABLES TEMP TEMPLATE TEMPORARY TESTING_RANGES TESTING_RELOCATE TEXT THAN THEN
 %token <str>   TIME TIMESTAMP TIMESTAMPTZ TO TRAILING TRACE TRANSACTION TREAT TRIM TRUE
 %token <str>   TRUNCATE TYPE
 
@@ -641,8 +641,8 @@ func (u *sqlSymUnion) partition() Partition {
 %type <TableDefs> opt_table_elem_list table_elem_list
 %type <*InterleaveDef> opt_interleave
 %type <*PartitionBy> opt_partition_by
-%type <Partition> partition
-%type <[]Partition> partition_list
+%type <Partition> list_partition range_partition
+%type <[]Partition> list_partitions range_partitions
 %type <empty> opt_all_clause
 %type <bool> distinct_clause
 %type <NameList> opt_column_list
@@ -2562,12 +2562,20 @@ opt_interleave_drop_behavior:
 
 // TODO(dan): PARTITION BY RANGE
 opt_partition_by:
-  PARTITION BY LIST '(' name_list ')' '(' partition_list ')'
+  PARTITION BY LIST '(' name_list ')' '(' list_partitions ')'
   {
     $$.val = &PartitionBy{
       Typ: PartitionByList,
       Fields: $5.nameList(),
-      Partitions: $8.partitionList(),
+      Partitions: $8.partitions(),
+    }
+  }
+| PARTITION BY RANGE '(' name_list ')' '(' range_partitions ')'
+  {
+    $$.val = &PartitionBy{
+      Typ: PartitionByRange,
+      Fields: $5.nameList(),
+      Partitions: $8.partitions(),
     }
   }
 | /* EMPTY */
@@ -2575,23 +2583,39 @@ opt_partition_by:
     $$.val = (*PartitionBy)(nil)
   }
 
-partition_list:
-  partition
+list_partitions:
+  list_partition
   {
     $$.val = []Partition{$1.partition()}
   }
-/* TODO(dan): figure out this shift/reduce conflict
-  | partition_list ',' partition
+  | list_partitions ',' list_partition
   {
-    $$.val = append($1.partitionList(), $3.partition())
+    $$.val = append($1.partitions(), $3.partition())
   }
-*/
 
-partition:
-  PARTITION any_name values_clause
+
+list_partition:
+  PARTITION any_name ctext_row
   {
-    // TODO(dan): select_clause instead of values_clause
-    $$.val = Partition{Name: $2.unresolvedName(), Values: $3.selectStmt()}
+    // TODO(dan): select_clause instead of ctext_row
+    $$.val = Partition{Name: $2.unresolvedName(), Values: []*Tuple{{Exprs: $3.exprs()}}, Typ: PartitionByList}
+  }
+
+range_partitions:
+  range_partition
+  {
+    $$.val = []Partition{$1.partition()}
+  }
+  | range_partitions ',' range_partition
+  {
+    $$.val = append($1.partitions(), $3.partition())
+  }
+
+range_partition:
+  PARTITION any_name VALUES LESS THAN ctext_row
+  {
+    // TODO(dan): select_clause instead of ctext_row
+    $$.val = Partition{Name: $2.unresolvedName(), Values: []*Tuple{{Exprs: $6.exprs()}}, Typ: PartitionByRange}
   }
 
 column_def:
@@ -6297,6 +6321,7 @@ unreserved_keyword:
 | KV
 | LC_COLLATE
 | LC_CTYPE
+| LESS
 | LEVEL
 | LIST
 | LOCAL
@@ -6378,6 +6403,7 @@ unreserved_keyword:
 | TESTING_RANGES
 | TESTING_RELOCATE
 | TEXT
+| THAN
 | TRACE
 | TRANSACTION
 | TRUNCATE
