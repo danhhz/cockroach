@@ -213,7 +213,7 @@ emerge as a side-effect of how the current source code is organized:
 
 - **the distSQL query planner also talks directly to the distributed storage layer**
   to get *locality information* about which nodes are leaseholders for which ranges.
-  
+
 - **the APL/CCL interface,** which aims to augment the functionality
   of the APL code if and only if the CCL code is also compiled
   in. This interface has many points where the CCL code "hooks itself"
@@ -497,7 +497,7 @@ using `EXPLAIN(NOOPTIMIZE,NOEXPAND)`.
 2. `triggerFilterPropagation()`: seee
    https://www.cockroachlabs.com/blog/better-sql-joins-in-cockroachdb/#optimizing-query-filters
 3. `expandPlan()`:
-   - `doExpandPlan()`: depth-first recursive traversal of the plan to:    
+   - `doExpandPlan()`: depth-first recursive traversal of the plan to:
      - perform index selection and replace `scanNode`s with `indexJoinNode`s.
      - elide unnecessary `renderNode`s.
      - propagate limits.
@@ -652,7 +652,7 @@ by distSQL are still unchecked.
   `session.PreparedStatements.New()`/`Delete()`,
   `CopyData()`/`CopyDone()`/`CopyEnd()`;
 
-- for the internal SQL interface: `QueryRow()`, `queryRows()`,
+- for the internal SQL interface: `QueryRow()`, `QueryRows()`,
   `query()`, `exec()`;
 
 - into the other components within the SQL layer: see the interfaces
@@ -791,12 +791,12 @@ of monitor:
   pre-registered from the `"sql"` monitor to the `"root"` monitor
   below, without needing to actually interact with the `"sql"` monitor
   (a sort of buffer, to reduce mutex contention);
-  
+
 - `"root"`, one per `Session` instance (`Session.mon`), hanging off
   one of the root monitors for pgwire and admin RPC commands, and
   completely standalone (i.e. unchecked) for uses of the internal SQL
   interface;
-  
+
 - `"session"`, one per `Session` instance (`Session.sessionMon`),
   hanging off `"root"`, for session-wide allocations like prepared
   statements and result sets;

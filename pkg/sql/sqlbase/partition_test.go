@@ -81,9 +81,10 @@ func TestPartitions(t *testing.T) {
 
 	sqlDB.Exec(`CREATE DATABASE data`)
 	sqlDB.Exec(`CREATE TABLE data.foo (
-		a INT PRIMARY KEY, b INT
-	) PARTITION BY LIST (a) (
-		PARTITION p1 VALUES (1)
+		a INT, b INT, PRIMARY KEY (a, b)
+	) PARTITION BY LIST (a, b) (
+		PARTITION p1 (VALUES (10, 11)),
+		PARTITION p2 (VALUES (20, 21))
 	)`)
 
 	cfg := config.DefaultZoneConfig()

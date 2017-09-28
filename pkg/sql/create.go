@@ -1117,30 +1117,57 @@ func (p *planner) finalizeInterleave(
 
 func addPartitionedBy(
 	ctx context.Context,
-	desc *sqlbase.TableDescriptor,
-	index *sqlbase.IndexDescriptor,
+	tableDesc *sqlbase.TableDescriptor,
+	indexDesc *sqlbase.IndexDescriptor,
 	part *parser.PartitionBy,
 	evalCtx *parser.EvalContext,
 ) error {
-	switch part.Typ {
-	case parser.PartitionByList:
-	default:
-		return errors.Errorf("unsupported PARTITION BY: %s", part.Typ)
-	}
-
 	// TODO(dan): Validate part.Fields against the index columns.
 
-	index.Partitioning = sqlbase.PartitioningDescriptor{
+	indexDesc.Partitioning = sqlbase.PartitioningDescriptor{
 		NumColumns: uint32(len(part.Fields)),
 	}
 
+	colMap := make(map[sqlbase.ColumnID]int)
+	for i := 0; i < len(part.Fields); i++ {
+		colMap[indexDesc.ColumnIDs[i]] = i
+	}
+
 	for _, partition := range part.Partitions {
-		rows, err := evalCtx.Planner.QueryRow(ctx, partition.Values.String())
+		rows, err := evalCtx.Planner.QueryRows(ctx, fmt.Sprintf(`SELECT * FROM %s`, partition.Values))
 		if err != nil {
 			return err
 		}
-		log.Info(ctx, rows)
+
+		var values []sqlbase.EncodedEncDatums
+		var scratch []byte
+		for _, row := range rows {
+			if len(row) != len(part.Fields) {
+				return errors.Errorf("got %d expected %d", len(row), len(part.Fields))
+			}
+			var value []byte
+			var err error
+			for i, datum := range row {
+				value, err = sqlbase.EncodeTableValue(value, indexDesc.ColumnIDs[i], datum, scratch)
+				if err != nil {
+					return err
+				}
+			}
+			values = append(values, value)
+		}
+
+		switch part.Typ {
+		case parser.PartitionByList:
+			indexDesc.Partitioning.List = append(indexDesc.Partitioning.List, sqlbase.PartitioningDescriptor_List{
+				Name:   partition.Name,
+				Values: values,
+			})
+		default:
+			return errors.Errorf("unsupported PARTITION BY: %s", part.Typ)
+		}
 	}
+
+	log.Infof(ctx, "%+v", indexDesc.Partitioning)
 
 	return nil
 }

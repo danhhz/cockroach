@@ -68,7 +68,7 @@ func (ie InternalExecutor) QueryRowsInTransaction(
 	p := makeInternalPlanner(opName, txn, security.RootUser, ie.LeaseManager.memMetrics)
 	defer finishInternalPlanner(p)
 	ie.initSession(p)
-	return p.queryRows(ctx, statement, qargs...)
+	return p.QueryRows(ctx, statement, qargs...)
 }
 
 // GetTableSpan gets the key span for a SQL table, including any indices.

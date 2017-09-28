@@ -362,7 +362,7 @@ CREATE TABLE crdb_internal.jobs (
 );
 `,
 	populate: func(ctx context.Context, p *planner, _ string, addRow func(...parser.Datum) error) error {
-		rows, err := p.queryRows(ctx, `SELECT id, status, created, payload FROM system.jobs`)
+		rows, err := p.QueryRows(ctx, `SELECT id, status, created, payload FROM system.jobs`)
 		if err != nil {
 			return err
 		}

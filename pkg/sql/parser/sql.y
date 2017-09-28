@@ -2595,10 +2595,9 @@ list_partitions:
 
 
 list_partition:
-  PARTITION any_name ctext_row
+  PARTITION name table_ref
   {
-    // TODO(dan): select_clause instead of ctext_row
-    $$.val = Partition{Name: $2.unresolvedName(), Values: []*Tuple{{Exprs: $3.exprs()}}, Typ: PartitionByList}
+    $$.val = Partition{Name: $2, Values: $3.tblExpr(), Typ: PartitionByList}
   }
 
 range_partitions:
@@ -2612,10 +2611,9 @@ range_partitions:
   }
 
 range_partition:
-  PARTITION any_name VALUES LESS THAN ctext_row
+  PARTITION name VALUES LESS THAN table_ref
   {
-    // TODO(dan): select_clause instead of ctext_row
-    $$.val = Partition{Name: $2.unresolvedName(), Values: []*Tuple{{Exprs: $6.exprs()}}, Typ: PartitionByRange}
+    $$.val = Partition{Name: $2, Values: $6.tblExpr(), Typ: PartitionByRange}
   }
 
 column_def:

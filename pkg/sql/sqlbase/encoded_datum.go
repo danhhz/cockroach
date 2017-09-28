@@ -256,6 +256,37 @@ func (ed *EncDatum) Compare(
 	return ed.Datum.Compare(evalCtx, rhs.Datum), nil
 }
 
+// EncodedEncDatums TODO(dan)
+type EncodedEncDatums []byte
+
+func (r EncodedEncDatums) String() string {
+	var b bytes.Buffer
+	for buf, i := r, 0; len(buf) > 0; i++ {
+		if i != 0 {
+			b.WriteString("/")
+		}
+		remaining, pretty, err := sniffDecode(buf)
+		if err != nil {
+			panic(err)
+		}
+		b.WriteString(pretty)
+		buf = remaining
+	}
+	return b.String()
+}
+
+func sniffDecode(b []byte) ([]byte, string, error) {
+	_, _, colID, typ, err := encoding.DecodeValueTag(b)
+	if err == nil && typ < encoding.SentinelType && colID < 100 {
+		remaining, pretty, err := encoding.PrettyPrintValueEncoded(b)
+		if err == nil {
+			return remaining, pretty, nil
+		}
+	}
+	remaining, pretty, err := encoding.PrettyPrintFirstValue(b)
+	return remaining, pretty, err
+}
+
 // EncDatumRow is a row of EncDatums.
 type EncDatumRow []EncDatum
 
