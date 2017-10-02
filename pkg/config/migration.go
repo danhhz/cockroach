@@ -40,5 +40,7 @@ func MigrateZoneConfig(value *roachpb.Value) (ZoneConfig, error) {
 		}
 		zone.ReplicaAttrs = nil
 	}
+	// Partitioning was added after the new ZoneConfig format was added, so no
+	// migrations necessary.
 	return zone, nil
 }

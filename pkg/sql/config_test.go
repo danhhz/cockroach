@@ -15,6 +15,7 @@
 package sql_test
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/gogo/protobuf/proto"
@@ -251,5 +252,96 @@ func TestGetZoneConfig(t *testing.T) {
 				t.Errorf("#%d: bad zone config.\nexpected: %+v\ngot: %+v", tcNum, tc.zoneCfg, zoneCfg)
 			}
 		}
+	}
+}
+
+// TODO(dan): BEFORE MERGE this should all be in TestGetZoneConfig instead
+func TestPartitions(t *testing.T) {
+	zones := []struct {
+		id  uint32
+		cfg config.ZoneConfig
+	}{
+		{51, config.ZoneConfig{NumReplicas: 1}},
+		{52, config.ZoneConfig{
+			NumReplicas: 2,
+			PartitionSpans: []config.PartitionSpan{
+				{Partition: "[1,1)", Span: roachpb.Span{Key: []byte{1}}},
+				{Partition: "[3,4)", Span: roachpb.Span{Key: []byte{3}, EndKey: []byte{5}}},
+			},
+			PartitionZones: map[string]config.ZoneConfig{
+				"[1,1)": {NumReplicas: 3},
+				"[3,4)": {NumReplicas: 4},
+			},
+		}},
+		{53, config.ZoneConfig{
+			NumReplicas: 0,
+			PartitionSpans: []config.PartitionSpan{
+				{Partition: "[1,1)", Span: roachpb.Span{Key: []byte{1}}},
+				{Partition: "[3,4)", Span: roachpb.Span{Key: []byte{3}, EndKey: []byte{5}}},
+			},
+			PartitionZones: map[string]config.ZoneConfig{
+				"[1,1)": {NumReplicas: 5},
+				"[3,4)": {NumReplicas: 6},
+			},
+		}},
+	}
+	descs := []struct {
+		id   sqlbase.ID
+		desc *sqlbase.Descriptor
+	}{
+		{51, sqlbase.WrapDescriptor(&sqlbase.DatabaseDescriptor{ID: 1})},
+		{52, sqlbase.WrapDescriptor(&sqlbase.TableDescriptor{ID: 52, ParentID: 51})},
+		{53, sqlbase.WrapDescriptor(&sqlbase.TableDescriptor{ID: 53, ParentID: 51})},
+	}
+	var cfg config.SystemConfig
+	for _, zone := range zones {
+		var v roachpb.Value
+		if err := v.SetProto(&zone.cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Values = append(cfg.Values, roachpb.KeyValue{
+			Key:   sqlbase.MakeZoneKey(sqlbase.ID(zone.id)),
+			Value: v,
+		})
+	}
+	for _, desc := range descs {
+		var v roachpb.Value
+		if err := v.SetProto(desc.desc); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Values = append(cfg.Values, roachpb.KeyValue{
+			Key:   sqlbase.MakeDescMetadataKey(desc.id),
+			Value: v,
+		})
+	}
+	sort.Sort(roachpb.KeyValueByKey(cfg.Values))
+
+	tests := []struct {
+		key                 []byte
+		expectedNumReplicas int32
+	}{
+		{append(keys.MakeTablePrefix(52), 0), 2},
+		{append(keys.MakeTablePrefix(52), 1), 3},
+		{append(keys.MakeTablePrefix(52), 2), 2},
+		{append(keys.MakeTablePrefix(52), 3), 4},
+		{append(keys.MakeTablePrefix(52), 4), 4},
+		{append(keys.MakeTablePrefix(52), 5), 2},
+		{append(keys.MakeTablePrefix(53), 0), 1},
+		{append(keys.MakeTablePrefix(53), 1), 5},
+		{append(keys.MakeTablePrefix(53), 2), 1},
+		{append(keys.MakeTablePrefix(53), 3), 6},
+		{append(keys.MakeTablePrefix(53), 4), 6},
+		{append(keys.MakeTablePrefix(53), 5), 1},
+	}
+	for _, test := range tests {
+		t.Run("", func(t *testing.T) {
+			zone, err := cfg.GetZoneConfigForKey(test.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if zone.NumReplicas != test.expectedNumReplicas {
+				t.Errorf("got %d expected %d", zone.NumReplicas, test.expectedNumReplicas)
+			}
+		})
 	}
 }

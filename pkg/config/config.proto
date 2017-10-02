@@ -82,7 +82,7 @@ message ZoneConfig {
 
   // PartitionSpans maps non-overlapping subsets of this ZoneConfig's span to
   // Constrants overrides.
-  repeated PartitionSpan partition_spans = 7;
+  repeated PartitionSpan partition_spans = 7 [(gogoproto.nullable) = false];
   // PartitionConstraints are overrides of the Constrants field. Each is applied
   // to a subset of the span covered by this ZoneConfig as defined by the
   // PartitionSpans field.

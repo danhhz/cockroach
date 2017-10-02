@@ -15,6 +15,7 @@
 package config_test
 
 import (
+	"bytes"
 	"reflect"
 	"sort"
 	"testing"
@@ -35,10 +36,10 @@ func plainKV(k, v string) roachpb.KeyValue {
 	return kv([]byte(k), []byte(v))
 }
 
-func sqlKV(tableID uint32, indexID, descriptorID uint64) roachpb.KeyValue {
+func sqlKV(tableID uint32, indexID, pkCol uint64) roachpb.KeyValue {
 	k := keys.MakeTablePrefix(tableID)
 	k = encoding.EncodeUvarintAscending(k, indexID)
-	k = encoding.EncodeUvarintAscending(k, descriptorID)
+	k = encoding.EncodeUvarintAscending(k, pkCol)
 	k = encoding.EncodeUvarintAscending(k, 12345) // Column ID, but could be anything.
 	return kv(k, nil)
 }
@@ -58,30 +59,34 @@ func TestObjectIDForKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	testCases := []struct {
-		key     roachpb.RKey
-		success bool
-		id      uint32
+		key       roachpb.RKey
+		success   bool
+		id        uint32
+		remaining []byte
 	}{
 		// Before the structured span.
-		{roachpb.RKeyMin, false, 0},
+		{roachpb.RKeyMin, false, 0, nil},
 
 		// Boundaries of structured span.
-		{roachpb.RKeyMax, false, 0},
+		{roachpb.RKeyMax, false, 0, nil},
 
 		// Valid, even if there are things after the ID.
-		{testutils.MakeKey(keys.MakeTablePrefix(42), roachpb.RKey("\xff")), true, 42},
-		{keys.MakeTablePrefix(0), true, 0},
-		{keys.MakeTablePrefix(999), true, 999},
+		{testutils.MakeKey(keys.MakeTablePrefix(42), roachpb.RKey("\xff")), true, 42, nil},
+		{keys.MakeTablePrefix(0), true, 0, nil},
+		{keys.MakeTablePrefix(999), true, 999, nil},
 	}
 
 	for tcNum, tc := range testCases {
-		id, success := config.ObjectIDForKey(tc.key)
+		id, remaining, success := config.ObjectIDForKey(tc.key)
 		if success != tc.success {
 			t.Errorf("#%d: expected success=%t", tcNum, tc.success)
 			continue
 		}
 		if id != tc.id {
 			t.Errorf("#%d: expected id=%d, got %d", tcNum, tc.id, id)
+		}
+		if !bytes.Equal(remaining, tc.remaining) {
+			t.Errorf("#%d: expected id=%x, got %x", tcNum, tc.remaining, remaining)
 		}
 	}
 }
@@ -413,7 +418,7 @@ func TestGetZoneConfigForKey(t *testing.T) {
 	}
 	for tcNum, tc := range testCases {
 		var objectID uint32
-		config.ZoneConfigHook = func(_ config.SystemConfig, id uint32) (config.ZoneConfig, bool, error) {
+		config.ZoneConfigHook = func(_ config.SystemConfig, id uint32, remaining []byte) (config.ZoneConfig, bool, error) {
 			objectID = id
 			return config.ZoneConfig{}, false, nil
 		}

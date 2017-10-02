@@ -37,7 +37,7 @@ const (
 	minRangeMaxBytes = 64 << 10 // 64 KB
 )
 
-type zoneConfigHook func(SystemConfig, uint32) (ZoneConfig, bool, error)
+type zoneConfigHook func(SystemConfig, uint32, []byte) (ZoneConfig, bool, error)
 
 var (
 	// defaultZoneConfig is the default zone configuration used when no custom
@@ -179,19 +179,43 @@ func (z ZoneConfig) Validate() error {
 	return nil
 }
 
+// MaybeGetPartition returns either the partition ZoneConfig matching keySuffix
+// or the table ZoneConfig. If none of the partitions matched and there's no
+// table ZoneConfig, false is returned.
+func (z ZoneConfig) MaybeGetPartition(keySuffix []byte) (ZoneConfig, bool) {
+	// TODO(dan): PartitionSpans is sorted, so we could use binary search here
+	// instead of this linear scan.
+	for _, p := range z.PartitionSpans {
+		// The span's Key already has the prefix removed, so comparing to
+		// keySuffix is correct. EndKey is either set or implictly
+		// Key.PrefixEnd().
+		if p.Span.Key.Compare(keySuffix) <= 0 && (p.Span.EndKey == nil && bytes.HasPrefix(keySuffix, p.Span.Key) || p.Span.EndKey.Compare(keySuffix) > 0) {
+			// TODO(dan): Depending on how we implement subpartitions, this may
+			// need to recurse.
+			return z.PartitionZones[p.Partition], true
+		}
+	}
+	// No partitions matched. Return the table ZoneConfig if it's set.
+	// TODO(dan): Should we use an explicit bool?
+	if z.NumReplicas != 0 {
+		return z, true
+	}
+	return ZoneConfig{}, false
+}
+
 // ObjectIDForKey returns the object ID (table or database) for 'key',
 // or (_, false) if not within the structured key space.
-func ObjectIDForKey(key roachpb.RKey) (uint32, bool) {
+func ObjectIDForKey(key roachpb.RKey) (uint32, []byte, bool) {
 	if key.Equal(roachpb.RKeyMax) {
-		return 0, false
+		return 0, nil, false
 	}
 	if encoding.PeekType(key) != encoding.Int {
 		// TODO(marc): this should eventually return SystemDatabaseID.
-		return 0, false
+		return 0, nil, false
 	}
 	// Consume first encoded int.
-	_, id64, err := encoding.DecodeUvarintAscending(key)
-	return uint32(id64), err == nil
+	remaining, id64, err := encoding.DecodeUvarintAscending(key)
+	return uint32(id64), remaining, err == nil
 }
 
 // Equal checks for equality.
@@ -352,7 +376,7 @@ func (s SystemConfig) GetLargestObjectID(maxID uint32) (uint32, error) {
 // GetZoneConfigForKey looks up the zone config for the range containing 'key'.
 // It is the caller's responsibility to ensure that the range does not need to be split.
 func (s SystemConfig) GetZoneConfigForKey(key roachpb.RKey) (ZoneConfig, error) {
-	objectID, ok := ObjectIDForKey(key)
+	objectID, keySuffix, ok := ObjectIDForKey(key)
 	if !ok {
 		// Not in the structured data namespace.
 		objectID = keys.RootNamespaceID
@@ -373,16 +397,16 @@ func (s SystemConfig) GetZoneConfigForKey(key roachpb.RKey) (ZoneConfig, error) 
 		objectID = keys.SystemRangesID
 	}
 
-	return s.getZoneConfigForID(objectID)
+	return s.getZoneConfigForID(objectID, keySuffix)
 }
 
 // getZoneConfigForID looks up the zone config for the object (table or database)
 // with 'id'.
-func (s SystemConfig) getZoneConfigForID(id uint32) (ZoneConfig, error) {
+func (s SystemConfig) getZoneConfigForID(id uint32, keySuffix []byte) (ZoneConfig, error) {
 	testingLock.Lock()
 	hook := ZoneConfigHook
 	testingLock.Unlock()
-	if cfg, found, err := hook(s, id); err != nil || found {
+	if cfg, found, err := hook(s, id, keySuffix); err != nil || found {
 		return cfg, err
 	}
 	return DefaultZoneConfig(), nil
@@ -431,11 +455,11 @@ var StaticSplits = []struct {
 // ComputeSplitKey takes a start and end key and returns the first key at which
 // to split the span [start, end). Returns nil if no splits are required.
 //
-// Splits are required between user tables (i.e. /table/<id>), at the start
-// of the system-config tables (i.e. /table/0), and at certain points within the
-// system ranges that come before the system tables. The system-config range is
-// somewhat special in that it can contain multiple SQL tables
-// (/table/0-/table/<max-system-config-desc>) within a single range.
+// Splits are required between user tables (i.e. /table/<id>), at the start of
+// the system-config tables (i.e. /table/0), between partitions, and at certain
+// points within the system ranges that come before the system tables. The
+// system-config range is somewhat special in that it can contain multiple SQL
+// tables (/table/0-/table/<max-system-config-desc>) within a single range.
 func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKey {
 	// Before dealing with splits necessitated by SQL tables, handle all of the
 	// static splits earlier in the keyspace. Note that this list must be kept in
@@ -456,7 +480,7 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 
 	// If the above iteration over the static split points didn't decide anything,
 	// the key range must be somewhere in the SQL table part of the keyspace.
-	startID, ok := ObjectIDForKey(startKey)
+	startID, _, ok := ObjectIDForKey(startKey)
 	if !ok || startID <= keys.MaxSystemConfigDescID {
 		// The start key is either:
 		// - not part of the structured data span
