@@ -452,6 +452,13 @@ var StaticSplits = []struct {
 	},
 }
 
+func makeZoneKey(id uint32) roachpb.Key {
+	k := keys.MakeTablePrefix(uint32(keys.ZonesTableID))
+	k = encoding.EncodeUvarintAscending(k, 1)
+	k = encoding.EncodeUvarintAscending(k, uint64(id))
+	return keys.MakeFamilyKey(k, uint32(2))
+}
+
 // ComputeSplitKey takes a start and end key and returns the first key at which
 // to split the span [start, end). Returns nil if no splits are required.
 //
@@ -489,9 +496,10 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 		// by the user data span.
 		startID = keys.MaxSystemConfigDescID + 1
 	} else {
+		// TODO(dan): Remove this else
 		// The start key is either already a split key, or after the split
 		// key for its ID. We can skip straight to the next one.
-		startID++
+		// startID++
 	}
 
 	// Build key prefixes for sequential table IDs until we reach endKey. Note
@@ -504,16 +512,47 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 	findSplitKey := func(startID, endID uint32) roachpb.RKey {
 		// endID could be smaller than startID if we don't have user tables.
 		for id := startID; id <= endID; id++ {
-			key := roachpb.RKey(keys.MakeTablePrefix(id))
+			tablePrefix := roachpb.RKey(keys.MakeTablePrefix(id))
+			tablePrefixEnd := tablePrefix.PrefixEnd()
+
 			// Skip if this ID matches the provided startKey.
-			if !startKey.Less(key) {
+			// if !startKey.Less(key) {
+			// 	continue
+			// }
+			// // Handle the case where EndKey is already a table prefix.
+			// if !key.Less(endKey) {
+			// 	break
+			// }
+
+			if !startKey.Less(tablePrefixEnd) {
 				continue
 			}
-			// Handle the case where EndKey is already a table prefix.
-			if !key.Less(endKey) {
-				break
+			if !tablePrefix.Less(startKey) {
+				return tablePrefix
 			}
-			return key
+
+			if zoneVal := s.GetValue(makeZoneKey(id)); zoneVal != nil {
+				zone, err := MigrateZoneConfig(zoneVal)
+				if err != nil {
+					// TODO(dan): BEFORE MERGE what should this do? log and skip?
+					panic(err)
+				}
+				// TODO(dan): BEFORE MERGE HACK ALERT actually decode the int off the front
+				choppedStartKey := startKey[1:]
+				for _, p := range zone.PartitionSpans {
+					partitionStart := roachpb.RKey(p.Span.Key)
+					if !partitionStart.Less(choppedStartKey) {
+						return append(tablePrefix[:1], partitionStart...)
+					}
+					partitionEnd := roachpb.RKey(p.Span.EndKey)
+					if len(partitionEnd) == 0 {
+						partitionEnd = partitionStart.PrefixEnd()
+					}
+					if !partitionEnd.Less(choppedStartKey) {
+						return append(tablePrefix[:1], partitionEnd...)
+					}
+				}
+			}
 		}
 		return nil
 	}
