@@ -284,6 +284,25 @@ func (desc *IndexDescriptor) ColNamesString() string {
 
 var isUnique = map[bool]string{true: "UNIQUE "}
 
+// HasPartition returns whether the index has a partition with the specified
+// name.
+func (desc *IndexDescriptor) HasPartition(name string) bool {
+	if list := desc.Partitioning.List; list != nil {
+		for _, p := range list {
+			if p.Name == name {
+				return true
+			}
+		}
+	} else if ranges := desc.Partitioning.Range; ranges != nil {
+		for _, p := range ranges {
+			if p.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SQLString returns the SQL string describing this index. If non-empty,
 // "ON tableName" is included in the output in the correct place.
 func (desc *IndexDescriptor) SQLString(tableName string) string {
@@ -2067,6 +2086,58 @@ func (desc *TableDescriptor) PrimaryIndexSpan() roachpb.Span {
 func (desc *TableDescriptor) IndexSpan(indexID IndexID) roachpb.Span {
 	prefix := roachpb.Key(MakeIndexKeyPrefix(desc, indexID))
 	return roachpb.Span{Key: prefix, EndKey: prefix.PrefixEnd()}
+}
+
+// IndexSpansByPartition computes the spans that belong to each partition in the
+// specified index.
+func (desc *TableDescriptor) IndexSpansByPartition(
+	index *IndexDescriptor,
+) (map[string][]roachpb.Span, error) {
+	out := map[string][]roachpb.Span{}
+	n := int(index.Partitioning.NumColumns) // TODO(benesch): unsafe cast
+	colMap := make(map[ColumnID]int, n)
+	colTypes := make([]parser.Type, n)
+	for i := 0; i < n; i++ {
+		id := index.ColumnIDs[i]
+		colMap[id] = i
+		column, err := desc.FindColumnByID(id)
+		if err != nil {
+			return nil, err
+		}
+		colTypes[i] = column.Type.ToDatumType()
+	}
+	indexKeyPrefix := MakeIndexKeyPrefix(desc, index.ID)
+	var da DatumAlloc
+	if list := index.Partitioning.List; list != nil {
+		datums := make(parser.Datums, n)
+		for _, p := range list {
+			for i, v := range p.Values {
+				d, _, err := DecodeTableValue(&da, colTypes[i], v)
+				if err != nil {
+					return nil, err
+				}
+				datums[i] = d
+			}
+			key, _, err := EncodePartialIndexKey(
+				desc,
+				index,
+				n,
+				colMap,
+				datums,
+				indexKeyPrefix,
+			)
+			if err != nil {
+				return nil, err
+			}
+			out[p.Name] = append(out[p.Name], roachpb.Span{
+				Key: key, EndKey: roachpb.Key(key).PrefixEnd(),
+			})
+		}
+	} else if ranges := index.Partitioning.Range; ranges != nil {
+		// TODO(benesch)
+		panic("unimplemented")
+	}
+	return out, nil
 }
 
 // TableSpan returns the Span that corresponds to the entire table.

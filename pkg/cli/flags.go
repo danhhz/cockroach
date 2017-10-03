@@ -323,6 +323,7 @@ func init() {
 	zf := setZoneCmd.Flags()
 	stringFlag(zf, &zoneCtx.zoneConfig, cliflags.ZoneConfig, "")
 	boolFlag(zf, &zoneCtx.zoneDisableReplication, cliflags.ZoneDisableReplication, false)
+	stringFlag(zf, &zoneCtx.zonePartition, cliflags.ZonePartition, "")
 
 	varFlag(sqlShellCmd.Flags(), &sqlCtx.execStmts, cliflags.Execute)
 	boolFlag(sqlShellCmd.Flags(), &sqlCtx.unsafeUpdates, cliflags.UnsafeUpdates, false)
