@@ -516,19 +516,12 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 			tablePrefixEnd := tablePrefix.PrefixEnd()
 
 			// Skip if this ID matches the provided startKey.
-			// if !startKey.Less(key) {
-			// 	continue
-			// }
-			// // Handle the case where EndKey is already a table prefix.
-			// if !key.Less(endKey) {
-			// 	break
-			// }
-
 			if !startKey.Less(tablePrefixEnd) {
 				continue
 			}
-			if !tablePrefix.Less(startKey) {
-				return tablePrefix
+			// Handle the case where EndKey is already a table prefix.
+			if !tablePrefix.Less(endKey) {
+				return nil
 			}
 
 			if zoneVal := s.GetValue(makeZoneKey(id)); zoneVal != nil {
@@ -552,6 +545,9 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 						return append(tablePrefix[:1], partitionEnd...)
 					}
 				}
+			}
+			if startKey.Less(tablePrefix) {
+				return tablePrefix
 			}
 		}
 		return nil
