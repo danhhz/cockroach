@@ -88,7 +88,6 @@ func setZoneConfig(sqlDB *gosql.DB, names []string, cfg *config.ZoneConfig) erro
 		if !tableDesc.PrimaryIndex.HasPartition(names[2]) {
 			return fmt.Errorf("table %s has no partition named %s", names[1], names[2])
 		}
-		log.Infof(context.TODO(), "\n\n\n\n\n%+v", tableDesc.PrimaryIndex.Partitioning)
 
 		// TODO(benesch): move this logic to partition-time instead of
 		// zone-config-set time.

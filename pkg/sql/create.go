@@ -1167,8 +1167,6 @@ func addPartitionedBy(
 		}
 	}
 
-	log.Infof(ctx, "%+v", indexDesc.Partitioning)
-
 	return nil
 }
 
