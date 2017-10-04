@@ -189,7 +189,12 @@ func (z ZoneConfig) MaybeGetPartition(keySuffix []byte) (ZoneConfig, bool) {
 		// The span's Key already has the prefix removed, so comparing to
 		// keySuffix is correct. EndKey is either set or implictly
 		// Key.PrefixEnd().
-		if p.Span.Key.Compare(keySuffix) <= 0 && (p.Span.EndKey == nil && bytes.HasPrefix(keySuffix, p.Span.Key) || p.Span.EndKey.Compare(keySuffix) > 0) {
+		endKey := p.Span.EndKey
+		if len(endKey) == 0 {
+			endKey = p.Span.Key.PrefixEnd()
+		}
+		// log.Infof(context.TODO(), "MaybeGetPartition [%s,%s) %s %v %v", p.Span.Key, p.Span.EndKey, roachpb.Key(keySuffix), p.Span.Key.Compare(keySuffix) <= 0, bytes.Compare(keySuffix, endKey) < 0)
+		if p.Span.Key.Compare(keySuffix) <= 0 && bytes.Compare(keySuffix, endKey) < 0 {
 			// TODO(dan): Depending on how we implement subpartitions, this may
 			// need to recurse.
 			return z.PartitionZones[p.Partition], true
@@ -397,7 +402,11 @@ func (s SystemConfig) GetZoneConfigForKey(key roachpb.RKey) (ZoneConfig, error) 
 		objectID = keys.SystemRangesID
 	}
 
-	return s.getZoneConfigForID(objectID, keySuffix)
+	cfg, err := s.getZoneConfigForID(objectID, keySuffix)
+	if objectID == 51 {
+		log.Infof(context.TODO(), "GetZoneConfigForKey %v %s -> %v", err, roachpb.Key(append(keys.MakeTablePrefix(objectID), keySuffix...)), cfg.Constraints)
+	}
+	return cfg, err
 }
 
 // getZoneConfigForID looks up the zone config for the object (table or database)
@@ -530,19 +539,38 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 					// TODO(dan): BEFORE MERGE what should this do? log and skip?
 					panic(err)
 				}
-				// TODO(dan): BEFORE MERGE HACK ALERT actually decode the int off the front
-				choppedStartKey := startKey[1:]
+				// if !startKey.Less(keys.MakeTablePrefix(51)) {
+				// 	log.Infof(context.TODO(), "partition [%s,%s) -> %#v", startKey, endKey, zone)
+				// }
+				choppedStartKey := startKey[len(tablePrefix):]
 				for _, p := range zone.PartitionSpans {
+					if !startKey.Less(keys.MakeTablePrefix(51)) {
+						// log.Infof(context.TODO(), "partitionspan [%s,%s) -> [%s,%s)", startKey, endKey, p.Span.Key, p.Span.EndKey)
+					}
+
 					partitionStart := roachpb.RKey(p.Span.Key)
-					if !partitionStart.Less(choppedStartKey) {
-						return append(tablePrefix[:1], partitionStart...)
+					if partitionStart.Equal(endKey[len(tablePrefix):]) {
+						return nil
+					}
+					if choppedStartKey.Less(partitionStart) {
+						ret := append(tablePrefix, partitionStart...)
+						// log.Infof(context.TODO(), "\n\n\n\npartitionsplit [%s,%s) -> %s", startKey, endKey, roachpb.Key(ret))
+						return ret
 					}
 					partitionEnd := roachpb.RKey(p.Span.EndKey)
+					if partitionEnd.Equal(choppedStartKey) {
+						continue
+					}
+					if partitionEnd.Equal(endKey[len(tablePrefix):]) {
+						return nil
+					}
 					if len(partitionEnd) == 0 {
 						partitionEnd = partitionStart.PrefixEnd()
 					}
 					if !partitionEnd.Less(choppedStartKey) {
-						return append(tablePrefix[:1], partitionEnd...)
+						ret := append(tablePrefix, partitionEnd...)
+						// log.Infof(context.TODO(), "\n\n\n\npartitionsplit [%s,%s) -> %s", startKey, endKey, roachpb.Key(ret))
+						return ret
 					}
 				}
 			}
@@ -573,11 +601,17 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 		log.Errorf(context.TODO(), "unable to determine largest object ID from system config: %s", err)
 		return nil
 	}
-	return findSplitKey(startID, endID)
+	splitKey := findSplitKey(startID, endID)
+	// log.Infof(context.TODO(), "findSplitKey [%s,%s) -> %s", startKey, endKey, splitKey)
+	return splitKey
 }
 
 // NeedsSplit returns whether the range [startKey, endKey) needs a split due
 // to zone configs.
 func (s SystemConfig) NeedsSplit(startKey, endKey roachpb.RKey) bool {
-	return len(s.ComputeSplitKey(startKey, endKey)) > 0
+	splitKey := s.ComputeSplitKey(startKey, endKey)
+	if !startKey.Less(keys.MakeTablePrefix(51)) {
+		// log.Infof(context.TODO(), "NeedsSplit [%s,%s) -> %s", startKey, endKey, splitKey)
+	}
+	return len(splitKey) > 0
 }

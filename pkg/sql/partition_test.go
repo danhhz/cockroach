@@ -18,11 +18,15 @@ import (
 	"bytes"
 	gosql "database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
@@ -63,11 +67,47 @@ func setZoneConfig(sqlDB *gosql.DB, names []string, cfg *config.ZoneConfig) erro
 		if err := row.Scan(&buf); err != nil && err != gosql.ErrNoRows {
 			return err
 		}
-
 		var tableCfg config.ZoneConfig
 		if err := tableCfg.Unmarshal(buf); err != nil {
 			return err
 		}
+
+		// TODO(dan): Don't hardcode table 51. Heh
+		var descBytes []byte
+		if err := sqlDB.QueryRow(`SELECT descriptor FROM system.descriptor WHERE id = 51`).Scan(&descBytes); err != nil {
+			return err
+		}
+		var desc sqlbase.Descriptor
+		if err := desc.Unmarshal(descBytes); err != nil {
+			return nil
+		}
+		tableDesc := desc.GetTable()
+		if tableDesc == nil {
+			return fmt.Errorf("unable to decode table descriptor for %s", tableDesc)
+		}
+		if !tableDesc.PrimaryIndex.HasPartition(names[2]) {
+			return fmt.Errorf("table %s has no partition named %s", names[1], names[2])
+		}
+		log.Infof(context.TODO(), "\n\n\n\n\n%+v", tableDesc.PrimaryIndex.Partitioning)
+
+		// TODO(benesch): move this logic to partition-time instead of
+		// zone-config-set time.
+		spansByPartition, err := tableDesc.IndexSpansByPartition(&tableDesc.PrimaryIndex)
+		if err != nil {
+			return err
+		}
+		tableCfg.PartitionSpans = make([]config.PartitionSpan, 0, len(spansByPartition))
+		for partition, spans := range spansByPartition {
+			for _, span := range spans {
+				tableCfg.PartitionSpans = append(tableCfg.PartitionSpans, config.PartitionSpan{
+					Span: span, Partition: partition,
+				})
+			}
+		}
+		sort.Slice(tableCfg.PartitionSpans, func(i, j int) bool {
+			return tableCfg.PartitionSpans[i].Span.Key.Compare(tableCfg.PartitionSpans[j].Span.Key) < 0
+		})
+
 		if tableCfg.PartitionZones == nil {
 			tableCfg.PartitionZones = make(map[string]config.ZoneConfig)
 		}
@@ -75,6 +115,25 @@ func setZoneConfig(sqlDB *gosql.DB, names []string, cfg *config.ZoneConfig) erro
 		return save(tableID, &tableCfg)
 	}
 	return errors.Errorf("could not set config for: %v", names)
+}
+
+func allRangeDescriptors(ctx context.Context, db *client.DB) ([]roachpb.RangeDescriptor, error) {
+	rows, err := db.Scan(ctx, keys.Meta2Prefix, keys.MetaMax, 0)
+	if err != nil {
+		// NB: Don't wrap this error, as wrapped HandledRetryableTxnErrors are not
+		// automatically retried by db.Txn.
+		//
+		// TODO(benesch): teach the KV layer to use errors.Cause.
+		return nil, err
+	}
+
+	rangeDescs := make([]roachpb.RangeDescriptor, len(rows))
+	for i, row := range rows {
+		if err := row.ValueProto(&rangeDescs[i]); err != nil {
+			return nil, errors.Wrapf(err, "%s: unable to unmarshal range descriptor", row.Key)
+		}
+	}
+	return rangeDescs, nil
 }
 
 func TestPartitioning(t *testing.T) {
@@ -85,32 +144,50 @@ func TestPartitioning(t *testing.T) {
 		0: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc0"}}}}},
 		1: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc1"}}}}},
 		2: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc2"}}}}},
+		3: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc0"}}}}},
+		4: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc1"}}}}},
+		5: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc2"}}}}},
+		6: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc0"}}}}},
+		7: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc1"}}}}},
+		8: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc2"}}}}},
 	}}
-	tc := testcluster.StartTestCluster(t, 3, tcArgs)
+	tc := testcluster.StartTestCluster(t, 9, tcArgs)
 	defer tc.Stopper().Stop(ctx)
 	sqlDB := sqlutils.MakeSQLRunner(t, tc.Conns[0])
 
 	sqlDB.Exec(`CREATE DATABASE data`)
 	sqlDB.Exec(`CREATE TABLE data.foo (
 		a INT, b INT, PRIMARY KEY (a, b)
-	) PARTITION BY LIST (a, b) (
-		PARTITION dc1 (VALUES (10, 11)),
-		PARTITION dc2 (VALUES (20, 21))
+	) PARTITION BY LIST (a) (
+		PARTITION dc1 (VALUES (10)),
+		PARTITION dc2 (VALUES (20))
 	)`)
 
-	cfg := config.DefaultZoneConfig()
-	cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
-		Type: config.Constraint_REQUIRED, Value: "dc1",
-	}}}
-	if err := setZoneConfig(sqlDB.DB, []string{"data", "foo", "dc1"}, &cfg); err != nil {
-		t.Fatalf("%+v", err)
+	{
+		cfg := config.DefaultZoneConfig()
+		if err := setZoneConfig(sqlDB.DB, []string{"data", "foo"}, &cfg); err != nil {
+			t.Fatalf("%+v", err)
+		}
 	}
 
-	cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
-		Type: config.Constraint_REQUIRED, Value: "dc2",
-	}}}
-	if err := setZoneConfig(sqlDB.DB, []string{"data", "foo", "dc2"}, &cfg); err != nil {
-		t.Fatalf("%+v", err)
+	{
+		cfg := config.DefaultZoneConfig()
+		cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
+			Type: config.Constraint_REQUIRED, Value: "dc1",
+		}}}
+		if err := setZoneConfig(sqlDB.DB, []string{"data", "foo", "dc1"}, &cfg); err != nil {
+			t.Fatalf("%+v", err)
+		}
+	}
+
+	{
+		cfg := config.DefaultZoneConfig()
+		cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
+			Type: config.Constraint_REQUIRED, Value: "dc2",
+		}}}
+		if err := setZoneConfig(sqlDB.DB, []string{"data", "foo", "dc2"}, &cfg); err != nil {
+			t.Fatalf("%+v", err)
+		}
 	}
 
 	verifyScansOnNode := func(query string, node string) error {
@@ -141,12 +218,38 @@ func TestPartitioning(t *testing.T) {
 	testutils.SucceedsSoon(t, func() error {
 		dc1Err := verifyScansOnNode(`SELECT * FROM data.foo WHERE a = 10`, `n2`)
 		dc2Err := verifyScansOnNode(`SELECT * FROM data.foo WHERE a = 20`, `n3`)
+
 		if dc1Err != nil {
 			log.Info(ctx, dc1Err)
 		}
 		if dc2Err != nil {
 			log.Info(ctx, dc2Err)
 		}
+		if dc1Err != nil || dc2Err != nil {
+			var id int
+			var buf []byte
+			rows := sqlDB.Query(`SELECT id, config FROM system.zones`)
+			defer rows.Close()
+			for rows.Next() {
+				if err := rows.Scan(&id, &buf); err != nil {
+					t.Fatalf("%+v", err)
+				}
+				var cfg config.ZoneConfig
+				if err := cfg.Unmarshal(buf); err != nil {
+					t.Fatalf("%+v", err)
+				}
+				log.Infof(ctx, "config %d %v", id, cfg)
+			}
+
+			rangeDescs, err := allRangeDescriptors(ctx, tc.Server(0).KVClient().(*client.DB))
+			if err != nil {
+				t.Fatalf("%+v", err)
+			}
+			for _, rangeDesc := range rangeDescs {
+				log.Infof(ctx, "range %v", rangeDesc)
+			}
+		}
+
 		if dc1Err != nil {
 			return dc1Err
 		}

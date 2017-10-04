@@ -2107,6 +2107,7 @@ func (desc *TableDescriptor) IndexSpansByPartition(
 		colTypes[i] = column.Type.ToDatumType()
 	}
 	indexKeyPrefix := MakeIndexKeyPrefix(desc, index.ID)
+	indexKeyPrefix = indexKeyPrefix[1:]
 	var da DatumAlloc
 	if list := index.Partitioning.List; list != nil {
 		datums := make(parser.Datums, n)
