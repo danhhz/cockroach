@@ -499,6 +499,16 @@ func TestEnsureSafeSplitKey(t *testing.T) {
 		if !d.expected.Equal(out) {
 			t.Fatalf("%d: %s: expected %s, but got %s", i, d.in, d.expected, out)
 		}
+
+		prefixLen, err := GetRowPrefixLength(d.in)
+		if err != nil {
+			t.Fatalf("%d: %s: unexpected error: %v", i, d.in, err)
+		}
+		suffix := d.in[prefixLen:]
+		expectedSuffix := d.in[len(d.expected):]
+		if !bytes.Equal(suffix, expectedSuffix) {
+			t.Fatalf("%d: %s: expected %s, but got %s", i, d.in, expectedSuffix, suffix)
+		}
 	}
 
 	errorData := []struct {
@@ -514,6 +524,9 @@ func TestEnsureSafeSplitKey(t *testing.T) {
 		{e(1, 200)[:2], "insufficient bytes to decode uvarint value"},
 		// The column ID suffix is invalid.
 		{e(1, 2, 200)[:3], "insufficient bytes to decode uvarint value"},
+		// Exercises a former overflow bug. We decode a uint(18446744073709551610) which, if casted
+		// to int carelessly, results in -6.
+		{encoding.EncodeVarintAscending(MakeTablePrefix(999), 322434), "malformed table key"},
 	}
 	for i, d := range errorData {
 		_, err := EnsureSafeSplitKey(d.in)

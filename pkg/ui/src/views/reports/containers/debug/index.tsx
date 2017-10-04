@@ -103,6 +103,11 @@ export default function Debug() {
         <DebugTableRow title="Tracing">
           <DebugTableLink name="Requests" url="/debug/requests" />
           <DebugTableLink name="Events" url="/debug/events" />
+          <DebugTableLink
+            name="Logs"
+            url="/debug/logspy?count=1&amp;duration=10s&amp;grep=."
+            note="/debug/logspy?count=[count]&amp;duration=[duration]&amp;grep=[regexp]"
+          />
         </DebugTableRow>
         <DebugTableRow title="Stopper">
           <DebugTableLink name="Active Tasks" url="/debug/stopper" />
@@ -189,6 +194,18 @@ export default function Debug() {
             name="Range Log for Specific Range"
             url="/_admin/v1/rangelog/1?limit=100"
             note="/_admin/v1/rangelog/[range_id]?limit=100"
+          />
+        </DebugTableRow>
+        <DebugTableRow title="Allocator">
+          <DebugTableLink
+            name="Simulated Allocator Runs on a Specific Node"
+            url="/_status/allocator/node/local"
+            note="/_status/allocator/node/[node_id]"
+          />
+          <DebugTableLink
+            name="Simulated Allocator Runs on a Specific Range"
+            url="/_status/allocator/range/1"
+            note="/_status/allocator/range/[range_id]"
           />
         </DebugTableRow>
       </DebugTable>

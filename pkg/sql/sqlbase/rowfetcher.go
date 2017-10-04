@@ -22,6 +22,7 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -60,6 +61,10 @@ type RowFetcher struct {
 
 	// The set of ColumnIDs that are required.
 	neededCols util.FastIntSet
+
+	// True if the index key must be decoded. This is only true if there are no
+	// needed columns and the table has no interleave children.
+	mustDecodeIndexKey bool
 
 	// Map used to get the index for columns in cols.
 	colIdxMap map[ColumnID]int
@@ -142,6 +147,19 @@ func (rf *RowFetcher) Init(
 		}
 	}
 
+	// If there are interleaves, we need to read the index key in order to
+	// determine whether this row is actually part of the index we're scanning.
+	// If we need to return any values from the row, we also have to read the
+	// index key to either get those values directly or determine the row's
+	// column family id to map the row values to their columns.
+	// Otherwise, we can completely avoid decoding the index key.
+	// TODO(jordan): Relax this restriction. Ideally we could skip doing key
+	// reading work if we need values from outside of the key, but not from
+	// inside of the key.
+	if !rf.neededCols.Empty() || len(rf.index.InterleavedBy) > 0 || len(rf.index.Interleave.Ancestors) > 0 {
+		rf.mustDecodeIndexKey = true
+	}
+
 	var indexColumnIDs []ColumnID
 	indexColumnIDs, rf.indexColumnDirs = index.FullColumnIDs()
 
@@ -219,7 +237,6 @@ func (rf *RowFetcher) StartScanFrom(ctx context.Context, f kvFetcher) error {
 
 // NextKey retrieves the next key/value and sets kv/kvEnd. Returns whether a row
 // has been completed.
-// TODO(andrei): change to return error
 func (rf *RowFetcher) NextKey(ctx context.Context) (rowDone bool, err error) {
 	var ok bool
 
@@ -233,14 +250,26 @@ func (rf *RowFetcher) NextKey(ctx context.Context) (rowDone bool, err error) {
 			return true, nil
 		}
 
-		rf.keyRemainingBytes, ok, err = rf.ReadIndexKey(rf.kv.Key)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			// The key did not match the descriptor, which means it's
-			// interleaved data from some other table or index.
-			continue
+		// See Init() for a detailed description of when we can get away with not
+		// reading the index key.
+		if rf.mustDecodeIndexKey {
+			rf.keyRemainingBytes, ok, err = rf.ReadIndexKey(rf.kv.Key)
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				// The key did not match the descriptor, which means it's
+				// interleaved data from some other table or index.
+				continue
+			}
+		} else {
+			// We still need to consume the key until the family id, so processKV can
+			// know whether we've finished a row or not.
+			prefixLen, err := keys.GetRowPrefixLength(rf.kv.Key)
+			if err != nil {
+				return false, err
+			}
+			rf.keyRemainingBytes = rf.kv.Key[prefixLen:]
 		}
 
 		// For unique secondary indexes, the index-key does not distinguish one row
@@ -278,7 +307,7 @@ func prettyEncDatums(vals []EncDatum) string {
 
 // ReadIndexKey decodes an index key for the fetcher's table.
 func (rf *RowFetcher) ReadIndexKey(k roachpb.Key) (remaining []byte, ok bool, err error) {
-	return DecodeIndexKey(rf.alloc, rf.desc, rf.index.ID, rf.keyVals,
+	return DecodeIndexKey(rf.alloc, rf.desc, rf.index, rf.keyVals,
 		rf.indexColumnDirs, k)
 }
 

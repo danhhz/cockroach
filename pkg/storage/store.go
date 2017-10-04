@@ -96,6 +96,11 @@ const (
 	// recovery because it is on a recently restarted node.
 	prohibitRebalancesBehindThreshold = 1000
 
+	// Messages that provide detail about why a preemptive snapshot was rejected.
+	rebalancesDisabledMsg   = "rebalances disabled because node is behind"
+	snapshotApplySemBusyMsg = "store busy applying snapshots and/or removing replicas"
+	storeDrainingMsg        = "store is draining"
+
 	// IntersectingSnapshotMsg is part of the error message returned from
 	// canApplySnapshotLocked and is exposed here so testing can rely on it.
 	IntersectingSnapshotMsg = "snapshot intersects existing range"
@@ -645,6 +650,7 @@ type StoreTestingKnobs struct {
 	// ReplayProtectionFilterWrapper.
 	// TODO(bdarnell,tschottdorf): Migrate existing tests which use this
 	// to one of the other filters. See #10493
+	// TODO(andrei): Provide guidance on what to use instead for trapping reads.
 	TestingEvalFilter storagebase.ReplicaCommandFilter
 
 	// TestingApplyFilter is called before applying the results of a
@@ -2681,10 +2687,10 @@ func (s *Store) maybeWaitInPushTxnQueue(
 
 // reserveSnapshot throttles incoming snapshots. The returned closure is used
 // to cleanup the reservation and release its resources. A nil cleanup function
-// and a nil error indicates the reservation was declined.
+// and a non-empty rejectionMessage indicates the reservation was declined.
 func (s *Store) reserveSnapshot(
 	ctx context.Context, header *SnapshotRequest_Header,
-) (func(), error) {
+) (_cleanup func(), _rejectionMsg string, _err error) {
 	if header.RangeSize == 0 {
 		// Empty snapshots are exempt from rate limits because they're so cheap to
 		// apply. This vastly speeds up rebalancing any empty ranges created by a
@@ -2692,24 +2698,24 @@ func (s *Store) reserveSnapshot(
 		// getting stuck behind large snapshots managed by the replicate queue.
 	} else if header.CanDecline {
 		if atomic.LoadInt32(&s.rebalancesDisabled) == 1 {
-			return nil, nil
+			return nil, rebalancesDisabledMsg, nil
 		}
 		select {
 		case s.snapshotApplySem <- struct{}{}:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-s.stopper.ShouldStop():
-			return nil, errors.Errorf("stopped")
+			return nil, "", errors.Errorf("stopped")
 		default:
-			return nil, nil
+			return nil, snapshotApplySemBusyMsg, nil
 		}
 	} else {
 		select {
 		case s.snapshotApplySem <- struct{}{}:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-s.stopper.ShouldStop():
-			return nil, errors.Errorf("stopped")
+			return nil, "", errors.Errorf("stopped")
 		}
 	}
 
@@ -2721,7 +2727,7 @@ func (s *Store) reserveSnapshot(
 		if header.RangeSize != 0 {
 			<-s.snapshotApplySem
 		}
-	}, nil
+	}, "", nil
 }
 
 // HandleSnapshot reads an incoming streaming snapshot and applies it if
@@ -2734,17 +2740,20 @@ func (s *Store) HandleSnapshot(
 	if s.IsDraining() {
 		return stream.Send(&SnapshotResponse{
 			Status:  SnapshotResponse_DECLINED,
-			Message: "store is draining",
+			Message: storeDrainingMsg,
 		})
 	}
 
 	ctx := s.AnnotateCtx(stream.Context())
-	cleanup, err := s.reserveSnapshot(ctx, header)
+	cleanup, rejectionMsg, err := s.reserveSnapshot(ctx, header)
 	if err != nil {
 		return err
 	}
 	if cleanup == nil {
-		return stream.Send(&SnapshotResponse{Status: SnapshotResponse_DECLINED})
+		return stream.Send(&SnapshotResponse{
+			Status:  SnapshotResponse_DECLINED,
+			Message: rejectionMsg,
+		})
 	}
 	defer cleanup()
 
@@ -3171,9 +3180,9 @@ func (s *Store) processRaftRequest(
 		return roachpb.NewError(err)
 	}
 
-	if _, err := r.handleRaftReadyRaftMuLocked(inSnap); err != nil {
-		// mimic the behavior in processRaft.
-		log.Fatal(ctx, err)
+	if _, expl, err := r.handleRaftReadyRaftMuLocked(inSnap); err != nil {
+		// Mimic the behavior in processRaft.
+		log.Fatalf(ctx, "%s: %s", log.Safe(expl), err) // TODO(bdarnell)
 	}
 	removePlaceholder = false
 	return nil
@@ -3266,7 +3275,16 @@ func snapshotRateLimit(
 	}
 }
 
-var errMustRetrySnapshotDueToTruncation = errors.New("log truncation during snapshot removed sideloaded SSTable")
+type errMustRetrySnapshotDueToTruncation struct {
+	index, term uint64
+}
+
+func (e *errMustRetrySnapshotDueToTruncation) Error() string {
+	return fmt.Sprintf(
+		"log truncation during snapshot removed sideloaded SSTable at index %d, term %d",
+		e.index, e.term,
+	)
+}
 
 // sendSnapshot sends an outgoing snapshot via a pre-opened GRPC stream.
 func sendSnapshot(
@@ -3411,6 +3429,7 @@ func sendSnapshot(
 	{
 		var ent raftpb.Entry
 		for i := range logEntries {
+			ent.Reset()
 			if err := ent.Unmarshal(logEntries[i]); err != nil {
 				return err
 			}
@@ -3444,7 +3463,10 @@ func sendSnapshot(
 					// instance by pre-loading them into memory. Or we can make
 					// log truncation less aggressive about removing sideloaded
 					// files, by delaying trailing file deletion for a bit.
-					return errMustRetrySnapshotDueToTruncation
+					return &errMustRetrySnapshotDueToTruncation{
+						index: ent.Index,
+						term:  ent.Term,
+					}
 				}
 				return err
 			}
@@ -3519,7 +3541,9 @@ func (s *Store) processRequestQueue(ctx context.Context, rangeID roachpb.RangeID
 		if pErr := s.processRaftRequest(info.respStream.Context(), info.req, IncomingSnapshot{}); pErr != nil {
 			// If we're unable to process the request, clear the request queue. This
 			// only happens if we couldn't create the replica because the request was
-			// targeted to a removed range.
+			// targeted to a removed range. This is also racy and could cause us to
+			// drop messages to the deleted range occasionally (#18355), but raft
+			// will just retry.
 			q.Lock()
 			if len(q.infos) == 0 {
 				s.replicaQueues.Delete(int64(rangeID))
@@ -3542,9 +3566,9 @@ func (s *Store) processReady(ctx context.Context, rangeID roachpb.RangeID) {
 
 	start := timeutil.Now()
 	r := (*Replica)(value)
-	stats, err := r.handleRaftReady(IncomingSnapshot{})
+	stats, expl, err := r.handleRaftReady(IncomingSnapshot{})
 	if err != nil {
-		log.Fatal(ctx, err) // TODO(bdarnell)
+		log.Fatalf(ctx, "%s: %s", log.Safe(expl), err) // TODO(bdarnell)
 	}
 	elapsed := timeutil.Since(start)
 	s.metrics.RaftWorkingDurationNanos.Inc(elapsed.Nanoseconds())

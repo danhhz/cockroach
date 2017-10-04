@@ -23,13 +23,14 @@ import (
 	"github.com/biogo/store/llrb"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/cache"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil/singleflight"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
 // rangeCacheKey is the key type used to store and sort values in the
@@ -273,14 +274,16 @@ func (rdc *RangeDescriptorCache) lookupRangeDescriptorInternal(
 		return desc, returnToken, nil
 	}
 
-	if log.V(3) {
-		log.Infof(ctx, "lookup range descriptor: key=%s\n%s", key, rdc.stringLocked())
-	} else if log.V(2) {
+	if log.V(2) {
 		log.Infof(ctx, "lookup range descriptor: key=%s", key)
 	}
 
 	requestKey := makeLookupRequestKey(key, evictToken, useReverseScan)
-	resC := rdc.lookupRequests.DoChan(requestKey, func() (interface{}, error) {
+	resC, leader := rdc.lookupRequests.DoChan(requestKey, func() (interface{}, error) {
+		ctx := ctx // disable shadows linter
+		ctx, reqSpan := tracing.ForkCtxSpan(ctx, "range lookup")
+		defer tracing.FinishSpan(reqSpan)
+
 		rs, preRs, err := rdc.performRangeLookup(ctx, key, useReverseScan)
 		if err != nil {
 			return nil, err
@@ -339,11 +342,21 @@ func (rdc *RangeDescriptorCache) lookupRangeDescriptorInternal(
 	rdc.rangeCache.RUnlock()
 	doneWg()
 
+	// We only want to wait on context cancellation here if we are not the
+	// leader of the lookupRequest. If we are the leader then we'll wait for
+	// lower levels to propagate the context cancellation error over resC. This
+	// assures that as the leader we always wait for the function passed to
+	// DoChan to return before returning from this method.
+	ctxDone := ctx.Done()
+	if leader {
+		ctxDone = nil
+	}
+
 	// Wait for the inflight request.
 	var res singleflight.Result
 	select {
 	case res = <-resC:
-	case <-ctx.Done():
+	case <-ctxDone:
 		return nil, nil, ctx.Err()
 	}
 
@@ -451,10 +464,7 @@ func (rdc *RangeDescriptorCache) evictCachedRangeDescriptorLocked(
 	}
 
 	for {
-		if log.V(3) {
-			log.Infof(ctx, "evict cached descriptor: key=%s desc=%s\n%s",
-				descKey, cachedDesc, rdc.stringLocked())
-		} else if log.V(2) {
+		if log.V(2) {
 			log.Infof(ctx, "evict cached descriptor: key=%s desc=%s", descKey, cachedDesc)
 		}
 		rdc.rangeCache.cache.Del(rngKey)

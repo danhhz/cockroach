@@ -123,7 +123,7 @@ func (sc *SchemaChanger) AcquireLease(
 		expirationTimeUncertainty := time.Second
 
 		if tableDesc.Lease != nil {
-			if time.Unix(0, tableDesc.Lease.ExpirationTime).Add(expirationTimeUncertainty).After(timeutil.Now()) {
+			if timeutil.Unix(0, tableDesc.Lease.ExpirationTime).Add(expirationTimeUncertainty).After(timeutil.Now()) {
 				return errExistingSchemaChangeLease
 			}
 			log.Infof(ctx, "Overriding existing expired lease %v", tableDesc.Lease)
@@ -178,7 +178,7 @@ func (sc *SchemaChanger) ExtendLease(
 ) error {
 	// Check if there is still time on this lease.
 	minDesiredExpiration := timeutil.Now().Add(MinSchemaChangeLeaseDuration)
-	if time.Unix(0, existingLease.ExpirationTime).After(minDesiredExpiration) {
+	if timeutil.Unix(0, existingLease.ExpirationTime).After(minDesiredExpiration) {
 		return nil
 	}
 	// Update lease.
@@ -233,7 +233,8 @@ func DropTableName(
 func DropTableDesc(
 	ctx context.Context, tableDesc *sqlbase.TableDescriptor, db *client.DB, traceKV bool,
 ) error {
-	zoneKey, _, descKey := GetKeysForTableDescriptor(tableDesc)
+	descKey := sqlbase.MakeDescMetadataKey(tableDesc.ID)
+	zoneKeyPrefix := sqlbase.MakeZoneKeyPrefix(tableDesc.ID)
 
 	// Finished deleting all the table data, now delete the table meta data.
 	return db.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
@@ -241,11 +242,12 @@ func DropTableDesc(
 		b := &client.Batch{}
 		if traceKV {
 			log.VEventf(ctx, 2, "Del %s", descKey)
-			log.VEventf(ctx, 2, "Del %s", zoneKey)
+			log.VEventf(ctx, 2, "DelRange %s", zoneKeyPrefix)
 		}
+		// Delete the descriptor.
 		b.Del(descKey)
 		// Delete the zone config entry for this table.
-		b.Del(zoneKey)
+		b.DelRange(zoneKeyPrefix, zoneKeyPrefix.PrefixEnd(), false /* returnKeys */)
 		if err := txn.SetSystemConfigTrigger(); err != nil {
 			return err
 		}
@@ -1124,8 +1126,8 @@ func createSchemaChangeEvalCtx(ts hlc.Timestamp) parser.EvalContext {
 	// TODO(andrei): Figure out if this is what we want, and whether the
 	// timestamp from the session that enqueued the schema change
 	// is/should be used for impure functions like now().
-	evalCtx.SetTxnTimestamp(time.Unix(0 /* sec */, ts.WallTime))
-	evalCtx.SetStmtTimestamp(time.Unix(0 /* sec */, ts.WallTime))
+	evalCtx.SetTxnTimestamp(timeutil.Unix(0 /* sec */, ts.WallTime))
+	evalCtx.SetStmtTimestamp(timeutil.Unix(0 /* sec */, ts.WallTime))
 	evalCtx.SetClusterTimestamp(ts)
 
 	return evalCtx

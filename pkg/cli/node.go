@@ -31,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const (
@@ -74,7 +75,7 @@ func runLsNodes(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	return printQueryOutput(os.Stdout, lsNodesColumnHeaders, newRowSliceIter(rows), "")
+	return printQueryOutput(os.Stdout, lsNodesColumnHeaders, newRowSliceIter(rows))
 }
 
 var baseNodeColumnHeaders = []string{
@@ -183,7 +184,7 @@ func runStatusNode(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return printQueryOutput(os.Stdout, getStatusNodeHeaders(), newRowSliceIter(nodeStatusesToRows(nodeStatuses, decommissionStatusResp)), "")
+	return printQueryOutput(os.Stdout, getStatusNodeHeaders(), newRowSliceIter(nodeStatusesToRows(nodeStatuses, decommissionStatusResp)))
 }
 
 func getStatusNodeHeaders() []string {
@@ -210,9 +211,9 @@ func nodeStatusesToRows(
 	var rows [][]string
 	for i, nodeStatus := range statuses {
 		hostPort := nodeStatus.Desc.Address.AddressField
-		updatedAt := time.Unix(0, nodeStatus.UpdatedAt)
+		updatedAt := timeutil.Unix(0, nodeStatus.UpdatedAt)
 		updatedAtStr := updatedAt.Format(localTimeFormat)
-		startedAt := time.Unix(0, nodeStatus.StartedAt)
+		startedAt := timeutil.Unix(0, nodeStatus.StartedAt)
 		startedAtStr := startedAt.Format(localTimeFormat)
 		build := nodeStatus.BuildInfo.Tag
 
@@ -385,7 +386,7 @@ effect and the nodes will participate in the cluster as regular nodes.
 
 func printDecommissionStatus(resp serverpb.DecommissionStatusResponse) error {
 	return printQueryOutput(os.Stdout, decommissionNodesColumnHeaders,
-		newRowSliceIter(decommissionResponseValueToRows(resp.Status)), "")
+		newRowSliceIter(decommissionResponseValueToRows(resp.Status)))
 }
 
 func runRecommissionNode(cmd *cobra.Command, args []string) error {

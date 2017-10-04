@@ -338,11 +338,14 @@ func makeBackupDescriptor(
 	db := p.ExecCfg().DB
 
 	{
-		txn := client.NewTxn(db)
+		// TODO(andrei): Plumb a gatewayNodeID in here and also find a way to
+		// express that whatever this txn does should not count towards lease
+		// placement stats.
+		txn := client.NewTxn(db, 0 /* gatewayNodeID */)
 		opt := client.TxnExecOptions{AutoRetry: true, AutoCommit: true}
 		err := txn.Exec(ctx, opt, func(ctx context.Context, txn *client.Txn, opt *client.TxnExecOptions) error {
 			var err error
-			txn.SetFixedTimestamp(endTime)
+			txn.SetFixedTimestamp(ctx, endTime)
 			sqlDescs, err = allSQLDescriptors(ctx, txn)
 			return err
 		})
@@ -744,10 +747,13 @@ func backupResumeHook(typ jobs.Type) func(context.Context, *jobs.Job) error {
 		var tables []*sqlbase.TableDescriptor
 
 		{
-			txn := client.NewTxn(job.DB())
+			// TODO(andrei): Plumb a gatewayNodeID in here and also find a way to
+			// express that whatever this txn does should not count towards lease
+			// placement stats.
+			txn := client.NewTxn(job.DB(), 0 /* gatewayNodeID */)
 			opt := client.TxnExecOptions{AutoRetry: true, AutoCommit: true}
 			if err := txn.Exec(ctx, opt, func(ctx context.Context, txn *client.Txn, opt *client.TxnExecOptions) error {
-				txn.SetFixedTimestamp(details.EndTime)
+				txn.SetFixedTimestamp(ctx, details.EndTime)
 				for _, sqlDescID := range job.Payload().DescriptorIDs {
 					desc := &sqlbase.Descriptor{}
 					descKey := sqlbase.MakeDescMetadataKey(sqlDescID)
@@ -866,7 +872,7 @@ func showBackupPlanHook(
 		}
 		start := parser.DNull
 		if desc.StartTime.WallTime != 0 {
-			start = parser.MakeDTimestamp(time.Unix(0, desc.StartTime.WallTime), time.Nanosecond)
+			start = parser.MakeDTimestamp(timeutil.Unix(0, desc.StartTime.WallTime), time.Nanosecond)
 		}
 		for _, descriptor := range desc.Descriptors {
 			if table := descriptor.GetTable(); table != nil {
@@ -875,7 +881,7 @@ func showBackupPlanHook(
 					parser.NewDString(dbName),
 					parser.NewDString(table.Name),
 					start,
-					parser.MakeDTimestamp(time.Unix(0, desc.EndTime.WallTime), time.Nanosecond),
+					parser.MakeDTimestamp(timeutil.Unix(0, desc.EndTime.WallTime), time.Nanosecond),
 					parser.NewDInt(parser.DInt(descSizes[table.ID].DataSize)),
 					parser.NewDInt(parser.DInt(descSizes[table.ID].Rows)),
 				}

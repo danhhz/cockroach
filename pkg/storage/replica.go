@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"reflect"
 	"sort"
 	"sync/atomic"
@@ -300,7 +301,8 @@ type Replica struct {
 		// Last index/term persisted to the raft log (not necessarily
 		// committed). Note that lastTerm may be 0 (and thus invalid) even when
 		// lastIndex is known, in which case the term will have to be retrieved
-		// from the Raft log entry.
+		// from the Raft log entry. Use the invalidLastTerm constant for this
+		// case.
 		lastIndex, lastTerm uint64
 		// The most recent commit index seen in a message from the leader. Used by
 		// the follower to estimate the number of Raft log entries it is
@@ -588,6 +590,8 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 	if store.cfg.StorePool != nil {
 		r.leaseholderStats = newReplicaStats(store.Clock(), store.cfg.StorePool.getNodeLocalityString)
 	}
+	// Pass nil for the localityOracle because we intentionally don't track the
+	// origin locality of write load.
 	r.writeStats = newReplicaStats(store.Clock(), nil)
 
 	// Init rangeStr with the range ID.
@@ -672,7 +676,7 @@ func (r *Replica) initRaftMuLockedReplicaMuLocked(
 	if err != nil {
 		return err
 	}
-	r.mu.lastTerm = 0
+	r.mu.lastTerm = invalidLastTerm
 
 	pErr, err := r.mu.stateLoader.loadReplicaDestroyedError(ctx, r.store.Engine())
 	if err != nil {
@@ -825,15 +829,6 @@ func (r *Replica) setReplicaID(replicaID roachpb.ReplicaID) error {
 }
 
 func (r *Replica) setReplicaIDRaftMuLockedMuLocked(replicaID roachpb.ReplicaID) error {
-	if r.raftMu.sideloaded == nil || r.mu.replicaID != replicaID {
-		var err error
-		if r.raftMu.sideloaded, err = newDiskSideloadStorage(
-			r.store.cfg.Settings, r.mu.state.Desc.RangeID, replicaID, r.store.Engine().GetAuxiliaryDir(),
-		); err != nil {
-			return errors.Wrap(err, "while initializing sideloaded storage")
-		}
-	}
-
 	if r.mu.replicaID == replicaID {
 		// The common case: the replica ID is unchanged.
 		return nil
@@ -854,8 +849,41 @@ func (r *Replica) setReplicaIDRaftMuLockedMuLocked(replicaID roachpb.ReplicaID) 
 	// 	// TODO(bdarnell): clean up previous raftGroup (update peers)
 	// }
 
+	// Initialize or update the sideloaded storage. If the sideloaded storage
+	// already exists (which is iff the previous replicaID was non-zero), then
+	// we have to move the contained files over (this corresponds to the case in
+	// which our replica is removed and re-added to the range, without having
+	// the replica GC'ed in the meantime).
+	//
+	// Note that we can't race with a concurrent replicaGC here because both that
+	// and this is under raftMu.
+	var prevSideloadedDir string
+	if ss := r.raftMu.sideloaded; ss != nil {
+		prevSideloadedDir = ss.Dir()
+	}
+	var err error
+	if r.raftMu.sideloaded, err = newDiskSideloadStorage(
+		r.store.cfg.Settings, r.mu.state.Desc.RangeID, replicaID, r.store.Engine().GetAuxiliaryDir(),
+	); err != nil {
+		return errors.Wrap(err, "while initializing sideloaded storage")
+	}
+	if prevSideloadedDir != "" {
+		if _, err := os.Stat(prevSideloadedDir); err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			// Old directory not found.
+		} else {
+			// Old directory found, so we have something to move over to the new one.
+			if err := os.Rename(prevSideloadedDir, r.raftMu.sideloaded.Dir()); err != nil {
+				return errors.Wrap(err, "while moving sideloaded directory")
+			}
+		}
+	}
+
 	previousReplicaID := r.mu.replicaID
 	r.mu.replicaID = replicaID
+
 	if replicaID >= r.mu.minReplicaID {
 		r.mu.minReplicaID = replicaID + 1
 	}
@@ -1147,7 +1175,7 @@ func (r *Replica) OwnsValidLease(ts hlc.Timestamp) bool {
 
 func (r *Replica) ownsValidLeaseRLocked(ts hlc.Timestamp) bool {
 	return r.mu.state.Lease.OwnedBy(r.store.StoreID()) &&
-		r.leaseStatus(*r.mu.state.Lease, ts, r.mu.minLeaseProposedTS).state == leaseValid
+		r.leaseStatus(*r.mu.state.Lease, ts, r.mu.minLeaseProposedTS).State == LeaseState_VALID
 }
 
 // IsLeaseValid returns true if the replica's lease is owned by this
@@ -1159,7 +1187,7 @@ func (r *Replica) IsLeaseValid(lease roachpb.Lease, ts hlc.Timestamp) bool {
 }
 
 func (r *Replica) isLeaseValidRLocked(lease roachpb.Lease, ts hlc.Timestamp) bool {
-	return r.leaseStatus(lease, ts, r.mu.minLeaseProposedTS).state == leaseValid
+	return r.leaseStatus(lease, ts, r.mu.minLeaseProposedTS).State == LeaseState_VALID
 }
 
 // newNotLeaseHolderError returns a NotLeaseHolderError initialized with the
@@ -1204,15 +1232,12 @@ func (r *Replica) leaseGoodToGo(ctx context.Context) (LeaseStatus, bool) {
 	}
 
 	status := r.leaseStatus(*r.mu.state.Lease, timestamp, r.mu.minLeaseProposedTS)
-	switch status.state {
-	case leaseValid:
-		if status.lease.OwnedBy(r.store.StoreID()) {
-			// We own the lease...
-			if repDesc, err := r.getReplicaDescriptorRLocked(); err == nil {
-				if _, ok := r.mu.pendingLeaseRequest.TransferInProgress(repDesc.ReplicaID); !ok {
-					// ...and there is no transfer pending.
-					return status, true
-				}
+	if status.State == LeaseState_VALID && status.Lease.OwnedBy(r.store.StoreID()) {
+		// We own the lease...
+		if repDesc, err := r.getReplicaDescriptorRLocked(); err == nil {
+			if _, ok := r.mu.pendingLeaseRequest.TransferInProgress(repDesc.ReplicaID); !ok {
+				// ...and there is no transfer pending.
+				return status, true
 			}
 		}
 	}
@@ -1247,16 +1272,16 @@ func (r *Replica) redirectOnOrAcquireLease(ctx context.Context) (LeaseStatus, *r
 			defer r.mu.Unlock()
 
 			status = r.leaseStatus(*r.mu.state.Lease, timestamp, r.mu.minLeaseProposedTS)
-			switch status.state {
-			case leaseError:
+			switch status.State {
+			case LeaseState_ERROR:
 				// Lease state couldn't be determined.
 				log.VEventf(ctx, 2, "lease state couldn't be determined")
 				return nil, roachpb.NewError(
 					newNotLeaseHolderError(nil, r.store.StoreID(), r.mu.state.Desc))
 
-			case leaseValid, leaseStasis:
-				if !status.lease.OwnedBy(r.store.StoreID()) {
-					_, stillMember := r.mu.state.Desc.GetReplicaDescriptor(status.lease.Replica.StoreID)
+			case LeaseState_VALID, LeaseState_STASIS:
+				if !status.Lease.OwnedBy(r.store.StoreID()) {
+					_, stillMember := r.mu.state.Desc.GetReplicaDescriptor(status.Lease.Replica.StoreID)
 					if !stillMember {
 						// This would be the situation in which the lease holder gets removed when
 						// holding the lease, or in which a lease request erroneously gets accepted
@@ -1288,12 +1313,12 @@ func (r *Replica) redirectOnOrAcquireLease(ctx context.Context) (LeaseStatus, *r
 						// makes sure that lease requests for a replica not in the descriptor are
 						// bounced.
 						log.Fatalf(ctx, "lease %s owned by replica %+v that no longer exists",
-							status.lease, status.lease.Replica)
+							status.Lease, status.Lease.Replica)
 					}
 					// Otherwise, if the lease is currently held by another replica, redirect
 					// to the holder.
 					return nil, roachpb.NewError(
-						newNotLeaseHolderError(&status.lease, r.store.StoreID(), r.mu.state.Desc))
+						newNotLeaseHolderError(&status.Lease, r.store.StoreID(), r.mu.state.Desc))
 				}
 				// Check that we're not in the process of transferring the lease away.
 				// If we are transferring the lease away, we can't serve reads or
@@ -1315,7 +1340,7 @@ func (r *Replica) redirectOnOrAcquireLease(ctx context.Context) (LeaseStatus, *r
 				// renewed the lease, so we return the channel to block on renewal.
 				// Otherwise, we don't need to wait for the extension and simply
 				// ignore the returned channel (which is buffered) and continue.
-				if status.state == leaseStasis {
+				if status.State == LeaseState_STASIS {
 					return r.requestLeaseLocked(ctx, status), nil
 				}
 
@@ -1324,10 +1349,10 @@ func (r *Replica) redirectOnOrAcquireLease(ctx context.Context) (LeaseStatus, *r
 				// already an extension pending.
 				_, requestPending := r.mu.pendingLeaseRequest.RequestPending()
 				if !requestPending && r.requiresExpiringLeaseRLocked() {
-					renewal := status.lease.Expiration.Add(-r.store.cfg.RangeLeaseRenewalDuration().Nanoseconds(), 0)
+					renewal := status.Lease.Expiration.Add(-r.store.cfg.RangeLeaseRenewalDuration().Nanoseconds(), 0)
 					if !timestamp.Less(renewal) {
 						if log.V(2) {
-							log.Infof(ctx, "extending lease %s at %s", status.lease, timestamp)
+							log.Infof(ctx, "extending lease %s at %s", status.Lease, timestamp)
 						}
 						// We had an active lease to begin with, but we want to trigger
 						// a lease extension. We explicitly ignore the returned channel
@@ -1340,22 +1365,22 @@ func (r *Replica) redirectOnOrAcquireLease(ctx context.Context) (LeaseStatus, *r
 					}
 				}
 
-			case leaseExpired:
+			case LeaseState_EXPIRED:
 				// No active lease: Request renewal if a renewal is not already pending.
 				log.VEventf(ctx, 2, "request range lease (attempt #%d)", attempt)
 				return r.requestLeaseLocked(ctx, status), nil
 
-			case leaseProscribed:
+			case LeaseState_PROSCRIBED:
 				// Lease proposed timestamp is earlier than the min proposed
 				// timestamp limit this replica must observe. If this store
 				// owns the lease, re-request. Otherwise, redirect.
-				if status.lease.OwnedBy(r.store.StoreID()) {
+				if status.Lease.OwnedBy(r.store.StoreID()) {
 					log.VEventf(ctx, 2, "request range lease (attempt #%d)", attempt)
 					return r.requestLeaseLocked(ctx, status), nil
 				}
 				// If lease is currently held by another, redirect to holder.
 				return nil, roachpb.NewError(
-					newNotLeaseHolderError(&status.lease, r.store.StoreID(), r.mu.state.Desc))
+					newNotLeaseHolderError(&status.Lease, r.store.StoreID(), r.mu.state.Desc))
 			}
 
 			// Return a nil chan to signal that we have a valid lease.
@@ -1411,7 +1436,7 @@ func (r *Replica) redirectOnOrAcquireLease(ctx context.Context) (LeaseStatus, *r
 						}
 						return pErr
 					}
-					log.Eventf(ctx, "lease acquisition succeeded: %+v", status.lease)
+					log.Eventf(ctx, "lease acquisition succeeded: %+v", status.Lease)
 					return nil
 				case <-slowTimer.C:
 					slowTimer.Read = true
@@ -1686,10 +1711,10 @@ func (r *Replica) assertStateLocked(ctx context.Context, reader engine.Reader) {
 		// TODO(dt): expose properly once #15892 is addressed.
 		log.Errorf(ctx, "on-disk and in-memory state diverged:\n%s", pretty.Diff(diskState, r.mu.state))
 		r.mu.state.Desc, diskState.Desc = nil, nil
-		log.Fatal(ctx, log.Safe{
-			V: fmt.Sprintf("on-disk and in-memory state diverged: %s",
+		log.Fatal(ctx, log.Safe(
+			fmt.Sprintf("on-disk and in-memory state diverged: %s",
 				pretty.Diff(diskState, r.mu.state)),
-		})
+		))
 	}
 }
 
@@ -1719,7 +1744,8 @@ func (r *Replica) maybeInitializeRaftGroup(ctx context.Context) {
 	// will only campaign if it's been idle for >= election timeout,
 	// so there's most likely been no traffic to the range.
 	shouldCampaignOnCreation := r.mu.state.Lease.OwnedBy(r.store.StoreID()) ||
-		r.leaseStatus(*r.mu.state.Lease, r.store.Clock().Now(), r.mu.minLeaseProposedTS).state != leaseValid
+		r.leaseStatus(*r.mu.state.Lease, r.store.Clock().Now(), r.mu.minLeaseProposedTS).State !=
+			LeaseState_VALID
 	if err := r.withRaftGroupLocked(shouldCampaignOnCreation, func(raftGroup *raft.RawNode) (bool, error) {
 		return true, nil
 	}); err != nil {
@@ -2580,7 +2606,7 @@ func (r *Replica) tryExecuteWriteBatch(
 		if status, pErr = r.redirectOnOrAcquireLease(ctx); pErr != nil {
 			return nil, pErr, proposalNoRetry
 		}
-		lease = status.lease
+		lease = status.Lease
 	}
 
 	// Examine the read and write timestamp caches for preceding
@@ -3138,7 +3164,10 @@ type handleRaftReadyStats struct {
 // are ready to read, be saved to stable storage, committed or sent to other
 // peers. It takes a non-empty IncomingSnapshot to indicate that it is
 // about to process a snapshot.
-func (r *Replica) handleRaftReady(inSnap IncomingSnapshot) (handleRaftReadyStats, error) {
+//
+// The returned string is nonzero whenever an error is returned to give a
+// non-sensitive cue as to what happened.
+func (r *Replica) handleRaftReady(inSnap IncomingSnapshot) (handleRaftReadyStats, string, error) {
 	r.raftMu.Lock()
 	defer r.raftMu.Unlock()
 	return r.handleRaftReadyRaftMuLocked(inSnap)
@@ -3146,9 +3175,12 @@ func (r *Replica) handleRaftReady(inSnap IncomingSnapshot) (handleRaftReadyStats
 
 // handleRaftReadyLocked is the same as handleRaftReady but requires that the
 // replica's raftMu be held.
+//
+// The returned string is nonzero whenever an error is returned to give a
+// non-sensitive cue as to what happened.
 func (r *Replica) handleRaftReadyRaftMuLocked(
 	inSnap IncomingSnapshot,
-) (handleRaftReadyStats, error) {
+) (handleRaftReadyStats, string, error) {
 	var stats handleRaftReadyStats
 
 	ctx := r.AnnotateCtx(context.TODO())
@@ -3191,11 +3223,12 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	})
 	r.mu.Unlock()
 	if err != nil {
-		return stats, err
+		const expl = "while checking raft group for Ready"
+		return stats, expl, errors.Wrap(err, expl)
 	}
 
 	if !hasReady {
-		return stats, nil
+		return stats, "", nil
 	}
 
 	logRaftReady(ctx, rd)
@@ -3221,7 +3254,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	if !raft.IsEmptySnap(rd.Snapshot) {
 		snapUUID, err := uuid.FromBytes(rd.Snapshot.Data)
 		if err != nil {
-			return stats, errors.Wrap(err, "invalid snapshot id")
+			const expl = "invalid snapshot id"
+			return stats, expl, errors.Wrap(err, expl)
 		}
 		if inSnap.SnapUUID == (uuid.UUID{}) {
 			log.Fatalf(ctx, "programming error: a snapshot application was attempted outside of the streaming snapshot codepath")
@@ -3231,7 +3265,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		}
 
 		if err := r.applySnapshot(ctx, inSnap, rd.Snapshot, rd.HardState); err != nil {
-			return stats, err
+			const expl = "while applying snapshot"
+			return stats, expl, errors.Wrap(err, expl)
 		}
 
 		if err := func() error {
@@ -3241,17 +3276,22 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			if r.store.removePlaceholderLocked(ctx, r.RangeID) {
 				atomic.AddInt32(&r.store.counts.filledPlaceholders, 1)
 			}
-			if err := r.store.processRangeDescriptorUpdateLocked(ctx, r); err != nil {
-				return errors.Wrap(err, "could not processRangeDescriptorUpdate after applySnapshot")
-			}
-			return nil
+			return r.store.processRangeDescriptorUpdateLocked(ctx, r)
 		}(); err != nil {
-			return stats, err
+			const expl = "could not processRangeDescriptorUpdate after applySnapshot"
+			return stats, expl, errors.Wrap(err, expl)
 		}
 
+		// r.mu.lastIndex and r.mu.lastTerm were updated in applySnapshot, but
+		// we also want to make sure we reflect these changes in the local
+		// variables we're tracking here. We could pull these values from
+		// r.mu itself, but that would require us to grab a lock.
 		if lastIndex, err = r.raftMu.stateLoader.loadLastIndex(ctx, r.store.Engine()); err != nil {
-			return stats, err
+			const expl = "loading last index"
+			return stats, expl, errors.Wrap(err, expl)
 		}
+		lastTerm = invalidLastTerm
+
 		// We refresh pending commands after applying a snapshot because this
 		// replica may have been temporarily partitioned from the Raft group and
 		// missed leadership changes that occurred. Suppose node A is the leader,
@@ -3278,18 +3318,21 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		// last index.
 		thinEntries, sideLoadedEntriesSize, err := r.maybeSideloadEntriesRaftMuLocked(ctx, rd.Entries)
 		if err != nil {
-			return stats, err
+			const expl = "during sideloading"
+			return stats, expl, errors.Wrap(err, expl)
 		}
 		raftLogSize += sideLoadedEntriesSize
 		if lastIndex, lastTerm, raftLogSize, err = r.append(
 			ctx, writer, lastIndex, lastTerm, raftLogSize, thinEntries,
 		); err != nil {
-			return stats, err
+			const expl = "during append"
+			return stats, expl, errors.Wrap(err, expl)
 		}
 	}
 	if !raft.IsEmptyHardState(rd.HardState) {
 		if err := r.raftMu.stateLoader.setHardState(ctx, writer, rd.HardState); err != nil {
-			return stats, err
+			const expl = "during setHardState"
+			return stats, expl, errors.Wrap(err, expl)
 		}
 	}
 	writer.Close()
@@ -3308,7 +3351,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	// infer the that entries are persisted on the node that sends a snapshot.
 	start := timeutil.Now()
 	if err := batch.Commit(syncRaftLog.Get(&r.store.cfg.Settings.SV) && rd.MustSync); err != nil {
-		return stats, err
+		const expl = "while committing batch"
+		return stats, expl, errors.Wrap(err, expl)
 	}
 	elapsed := timeutil.Since(start)
 	r.store.metrics.RaftLogCommitLatency.RecordValue(elapsed.Nanoseconds())
@@ -3325,14 +3369,15 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		for i := firstPurge; i <= lastPurge; i++ {
 			err := r.raftMu.sideloaded.Purge(ctx, i, purgeTerm)
 			if err != nil && errors.Cause(err) != errSideloadedFileNotFound {
-				return stats, errors.Wrapf(err, "while purging index %d", i)
+				const expl = "while purging index %d"
+				return stats, expl, errors.Wrapf(err, expl, i)
 			}
 		}
 	}
 
-	// Update protected state (last index, raft log size and raft leader ID) and
-	// set raft log entry cache. We clear any older, uncommitted log entries and
-	// cache the latest ones.
+	// Update protected state (last index, last term, raft log size and raft
+	// leader ID) and set raft log entry cache. We clear any older, uncommitted
+	// log entries and cache the latest ones.
 	//
 	// Note also that we're likely to send messages related to the Entries we
 	// just appended, and these entries need to be inlined when sending them to
@@ -3396,7 +3441,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			if newEnt, err := maybeInlineSideloadedRaftCommand(
 				ctx, r.RangeID, e, r.raftMu.sideloaded, r.store.raftEntryCache,
 			); err != nil {
-				return stats, err
+				const expl = "maybeInlineSideloadedRaftCommand"
+				return stats, expl, errors.Wrap(err, expl)
 			} else if newEnt != nil {
 				e = *newEnt
 			}
@@ -3427,7 +3473,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 				if len(encodedCommand) == 0 {
 					commandID = ""
 				} else if err := command.Unmarshal(encodedCommand); err != nil {
-					return stats, err
+					const expl = "while unmarshalling entry"
+					return stats, expl, errors.Wrap(err, expl)
 				}
 			}
 
@@ -3454,15 +3501,18 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
 			if err := cc.Unmarshal(e.Data); err != nil {
-				return stats, err
+				const expl = "while unmarshaling ConfChange"
+				return stats, expl, errors.Wrap(err, expl)
 			}
 			var ccCtx ConfChangeContext
 			if err := ccCtx.Unmarshal(cc.Context); err != nil {
-				return stats, err
+				const expl = "while unmarshaling ConfChangeContext"
+				return stats, expl, errors.Wrap(err, expl)
 			}
 			var command storagebase.RaftCommand
 			if err := command.Unmarshal(ccCtx.Payload); err != nil {
-				return stats, err
+				const expl = "while unmarshaling RaftCommand"
+				return stats, expl, errors.Wrap(err, expl)
 			}
 			commandID := storagebase.CmdIDKey(ccCtx.CommandID)
 			if changedRepl := r.processRaftCommand(
@@ -3486,7 +3536,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 				raftGroup.ApplyConfChange(cc)
 				return true, nil
 			}); err != nil {
-				return stats, err
+				const expl = "during ApplyConfChange"
+				return stats, expl, errors.Wrap(err, expl)
 			}
 		default:
 			log.Fatalf(ctx, "unexpected Raft entry: %v", e)
@@ -3501,10 +3552,14 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	// TODO(bdarnell): need to check replica id and not Advance if it
 	// has changed. Or do we need more locking to guarantee that replica
 	// ID cannot change during handleRaftReady?
-	return stats, r.withRaftGroup(func(raftGroup *raft.RawNode) (bool, error) {
+	const expl = "during advance"
+	if err := r.withRaftGroup(func(raftGroup *raft.RawNode) (bool, error) {
 		raftGroup.Advance(rd)
 		return true, nil
-	})
+	}); err != nil {
+		return stats, expl, errors.Wrap(err, expl)
+	}
+	return stats, "", nil
 }
 
 // tick the Raft group, returning any error and true if the raft group exists
@@ -4491,7 +4546,16 @@ func (r *Replica) applyRaftCommand(
 	if rResult.State.RaftAppliedIndex <= 0 {
 		log.Fatalf(ctx, "raft command index is <= 0")
 	}
-	r.writeStats.recordCount(math.Max(float64(rResult.Delta.KeyCount), 1), 0)
+	if writeBatch != nil && len(writeBatch.Data) > 0 {
+		// Record the write activity, passing a 0 nodeID because replica.writeStats
+		// intentionally doesn't track the origin of the writes.
+		mutationCount, err := engine.RocksDBBatchCount(writeBatch.Data)
+		if err != nil {
+			log.Errorf(ctx, "unable to read header of committed WriteBatch: %s", err)
+		} else {
+			r.writeStats.recordCount(float64(mutationCount), 0 /* nodeID */)
+		}
+	}
 
 	r.mu.Lock()
 	oldRaftAppliedIndex := r.mu.state.RaftAppliedIndex
@@ -5373,6 +5437,7 @@ type ReplicaMetrics struct {
 	LeaseValid  bool
 	Leaseholder bool
 	LeaseType   roachpb.LeaseType
+	LeaseStatus LeaseStatus
 	Quiescent   bool
 	// Is this the replica which collects per-range metrics? This is done either
 	// on the leader or, if there is no leader, on the largest live replica ID.
@@ -5394,7 +5459,7 @@ func (r *Replica) Metrics(
 ) ReplicaMetrics {
 	r.mu.RLock()
 	raftStatus := r.raftStatusRLocked()
-	status := r.leaseStatus(*r.mu.state.Lease, now, r.mu.minLeaseProposedTS)
+	leaseStatus := r.leaseStatus(*r.mu.state.Lease, now, r.mu.minLeaseProposedTS)
 	quiescent := r.mu.quiescent || r.mu.internalRaftGroup == nil
 	desc := r.mu.state.Desc
 	selfBehindCount := r.getEstimatedBehindCountRLocked(raftStatus)
@@ -5411,7 +5476,7 @@ func (r *Replica) Metrics(
 		livenessMap,
 		desc,
 		raftStatus,
-		status,
+		leaseStatus,
 		r.store.StoreID(),
 		quiescent,
 		selfBehindCount,
@@ -5436,7 +5501,7 @@ func calcReplicaMetrics(
 	livenessMap map[roachpb.NodeID]bool,
 	desc *roachpb.RangeDescriptor,
 	raftStatus *raft.Status,
-	status LeaseStatus,
+	leaseStatus LeaseStatus,
 	storeID roachpb.StoreID,
 	quiescent bool,
 	selfBehindCount int64,
@@ -5446,10 +5511,11 @@ func calcReplicaMetrics(
 	var m ReplicaMetrics
 
 	var leaseOwner bool
-	if status.state == leaseValid {
+	m.LeaseStatus = leaseStatus
+	if leaseStatus.State == LeaseState_VALID {
 		m.LeaseValid = true
-		leaseOwner = status.lease.OwnedBy(storeID)
-		m.LeaseType = status.lease.Type()
+		leaseOwner = leaseStatus.Lease.OwnedBy(storeID)
+		m.LeaseType = leaseStatus.Lease.Type()
 	}
 	m.Leaseholder = m.LeaseValid && leaseOwner
 	m.Leader = isRaftLeader(raftStatus)

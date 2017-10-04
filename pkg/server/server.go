@@ -291,7 +291,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	rootSQLMemoryMonitor.Start(context.Background(), nil, mon.MakeStandaloneBudget(s.cfg.SQLMemoryPoolSize))
 
 	// Set up the DistSQL temp engine.
-	tempEngine, err := engine.NewTempEngine(ctx, s.cfg.TempStore)
+	tempEngine, err := engine.NewTempEngine(ctx, s.cfg.TempStoreSpec)
 	if err != nil {
 		log.Fatalf(ctx, "could not create temporary store: %v", err)
 	}
@@ -341,6 +341,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	s.node = NewNode(storeCfg, s.recorder, s.registry, s.stopper, txnMetrics, sql.MakeEventLogger(s.leaseMgr))
 	roachpb.RegisterInternalServer(s.grpc, s.node)
 	storage.RegisterConsistencyServer(s.grpc, s.node.storesServer)
+	serverpb.RegisterInitServer(s.grpc, &noopInitServer{clusterID: s.ClusterID})
 
 	s.sessionRegistry = sql.MakeSessionRegistry()
 	s.jobRegistry = jobs.MakeRegistry(
@@ -360,7 +361,8 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		Stopper:    s.stopper,
 		NodeID:     &s.nodeIDContainer,
 
-		TempStorage: tempEngine,
+		TempStorage:             tempEngine,
+		TempStorageMaxSizeBytes: s.cfg.TempStoreMaxSizeBytes,
 
 		ParentMemoryMonitor: &rootSQLMemoryMonitor,
 
@@ -857,6 +859,24 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "inspecting engines")
 	}
+
+	defer time.AfterFunc(30*time.Second, func() {
+		serverVersion := s.cfg.Settings.Version.ServerVersion
+		// If the version is an unstable development version, treat it as the last
+		// stable version so that the docs link will exist (for example, 1.1-5
+		// becomes 1.1).
+		serverVersion.Unstable = 0
+		msg := `The server appears to be unable to contact the other nodes in the cluster. Please try
+
+- starting the other nodes, if you haven't already
+- double-checking that the '--join' and '--host' flags are set up correctly
+- not using the '--background' flag.
+
+If problems persist, please see https://www.cockroachlabs.com/docs/v` + serverVersion.String() + `/cluster-setup-troubleshooting.html.`
+
+		log.Shout(context.Background(), log.Severity_WARNING,
+			msg)
+	}).Stop()
 
 	// Now that we have a monotonic HLC wrt previous incarnations of the process,
 	// init all the replicas. At this point *some* store has been bootstrapped or

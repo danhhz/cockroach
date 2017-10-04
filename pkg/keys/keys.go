@@ -352,20 +352,25 @@ func IsLocal(k roachpb.Key) bool {
 	return bytes.HasPrefix(k, localPrefix)
 }
 
-// Addr returns the address for the key, used to lookup the range containing
-// the key. In the normal case, this is simply the key's value. However, for
-// local keys, such as transaction records, range-spanning binary tree node
-// pointers, the address is the inner encoded key, with the local key prefix
-// and the suffix and optional detail removed. This address unwrapping is
-// performed repeatedly in the case of doubly-local keys. In this way, local
-// keys address to the same range as non-local keys, but are stored separately
-// so that they don't collide with user-space or global system keys.
+// Addr returns the address for the key, used to lookup the range containing the
+// key. In the normal case, this is simply the key's value. However, for local
+// keys, such as transaction records, the address is the inner encoded key, with
+// the local key prefix and the suffix and optional detail removed. This address
+// unwrapping is performed repeatedly in the case of doubly-local keys. In this
+// way, local keys address to the same range as non-local keys, but are stored
+// separately so that they don't collide with user-space or global system keys.
+//
+// Logically, the keys are arranged as follows:
+//
+// k1 /local/k1/KeyMin ... /local/k1/KeyMax k1\x00 /local/k1/x00/KeyMin ...
 //
 // However, not all local keys are addressable in the global map. Only range
 // local keys incorporating a range key (start key or transaction key) are
 // addressable (e.g. range metadata and txn records). Range local keys
 // incorporating the Range ID are not (e.g. abort cache entries, and range
 // stats).
+//
+// See AddrEndKey which is to be used when `k` is the EndKey of an interval.
 func Addr(k roachpb.Key) (roachpb.RKey, error) {
 	if !IsLocal(k) {
 		return roachpb.RKey(k), nil
@@ -404,13 +409,22 @@ func MustAddr(k roachpb.Key) roachpb.RKey {
 	return rk
 }
 
-// AddrUpperBound returns the address for the key, used to lookup the range containing
-// the key. However, unlike Addr, it will return the following key that local range
-// keys address to. This is necessary because range-local keys exist conceptually in the
-// space between regular keys. Addr() returns the regular key that is just to the left
-// of a range-local key, which is guaranteed to be located on the same range. AddrUpperBound()
-// returns the regular key that is just to the right, which may not be on the same range
-// but is suitable for use as the EndKey of a span involving a range-local key.
+// AddrUpperBound returns the address of an (exclusive) EndKey, used to lookup
+// ranges containing the keys strictly smaller than that key. However, unlike
+// Addr, it will return the following key that local range keys address to. This
+// is necessary because range-local keys exist conceptually in the space between
+// regular keys. Addr() returns the regular key that is just to the left of a
+// range-local key, which is guaranteed to be located on the same range.
+// AddrUpperBound() returns the regular key that is just to the right, which may
+// not be on the same range but is suitable for use as the EndKey of a span
+// involving a range-local key.
+//
+// Logically, the keys are arranged as follows:
+//
+// k1 /local/k1/KeyMin ... /local/k1/KeyMax k1\x00 /local/k1/x00/KeyMin ...
+//
+// and so any end key /local/k1/x corresponds to an address-resolved end key of
+// k1\x00.
 func AddrUpperBound(k roachpb.Key) (roachpb.RKey, error) {
 	rk, err := Addr(k)
 	if err != nil {
@@ -601,22 +615,24 @@ func MakeFamilyKey(key []byte, famID uint32) []byte {
 	return encoding.EncodeUvarintAscending(key, uint64(len(key)-size))
 }
 
-// EnsureSafeSplitKey transforms an SQL table key such that it is a valid split key
-// (i.e. does not occur in the middle of a row).
-func EnsureSafeSplitKey(key roachpb.Key) (roachpb.Key, error) {
-	if encoding.PeekType(key) != encoding.Int {
-		// Not a table key, so already a split key.
-		return key, nil
-	}
-
+// GetRowPrefixLength returns the length of the row prefix of the key. A table
+// key's row prefix is defined as the maximal prefix of the key that is also a
+// prefix of every key for the same row. (Any key with this maximal prefix is
+// also guaranteed to be part of the input key's row.)
+// For secondary index keys, the row prefix is defined as the entire key.
+func GetRowPrefixLength(key roachpb.Key) (int, error) {
 	n := len(key)
+	if encoding.PeekType(key) != encoding.Int {
+		// Not a table key, so the row prefix is the entire key.
+		return n, nil
+	}
 	// The column ID length is encoded as a varint and we take advantage of the
 	// fact that the column ID itself will be encoded in 0-9 bytes and thus the
 	// length of the column ID data will fit in a single byte.
 	buf := key[n-1:]
 	if encoding.PeekType(buf) != encoding.Int {
 		// The last byte is not a valid column ID suffix.
-		return nil, errors.Errorf("%s: not a valid table key", key)
+		return 0, errors.Errorf("%s: not a valid table key", key)
 	}
 
 	// Strip off the family ID / column ID suffix from the buf. The last byte of the buf
@@ -624,9 +640,11 @@ func EnsureSafeSplitKey(key roachpb.Key) (roachpb.Key, error) {
 	// does not contain a column ID suffix).
 	_, colIDLen, err := encoding.DecodeUvarintAscending(buf)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if int(colIDLen)+1 > n {
+	// Note how this next comparison (and by extension the code after it) is overflow-safe. There
+	// are more intuitive ways of writing this that aren't as safe. See #18628.
+	if colIDLen > uint64(n-1) {
 		// The column ID length was impossible. colIDLen is the length of
 		// the encoded column ID suffix. We add 1 to account for the byte
 		// holding the length of the encoded column ID and if that total
@@ -635,9 +653,23 @@ func EnsureSafeSplitKey(key roachpb.Key) (roachpb.Key, error) {
 		// EnsureSafeSplitKey can be called on keys that look like table
 		// keys but which do not have a column ID length suffix (e.g
 		// by SystemConfig.ComputeSplitKey).
-		return nil, errors.Errorf("%s: malformed table key", key)
+		return 0, errors.Errorf("%s: malformed table key", key)
 	}
-	return key[:len(key)-int(colIDLen)-1], nil
+	return len(key) - int(colIDLen) - 1, nil
+}
+
+// EnsureSafeSplitKey transforms an SQL table key such that it is a valid split key
+// (i.e. does not occur in the middle of a row).
+func EnsureSafeSplitKey(key roachpb.Key) (roachpb.Key, error) {
+	// The row prefix for a key is unique to keys in its row - no key without the
+	// row prefix will be in the key's row. Therefore, we can be certain that
+	// using the row prefix for a key as a split key is safe: it doesn't occur in
+	// the middle of a row.
+	idx, err := GetRowPrefixLength(key)
+	if err != nil {
+		return nil, err
+	}
+	return key[:idx], nil
 }
 
 // Range returns a key range encompassing all the keys in the Batch.

@@ -16,6 +16,7 @@ package sql
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -238,6 +239,15 @@ func newQueryNotSupportedErrorf(format string, args ...interface{}) error {
 var mutationsNotSupportedError = newQueryNotSupportedError("mutations not supported")
 var setNotSupportedError = newQueryNotSupportedError("SET / SET CLUSTER SETTING should never distribute")
 
+// leafType returns the element type if the given type is an array, and the type
+// itself otherwise.
+func leafType(t parser.Type) parser.Type {
+	if a, ok := t.(parser.TArray); ok {
+		return leafType(a.Typ)
+	}
+	return t
+}
+
 // checkSupportForNode returns a distRecommendation (as described above) or an
 // error if the plan subtree is not supported by DistSQL.
 // TODO(radu): add tests for this.
@@ -251,8 +261,8 @@ func (dsp *distSQLPlanner) checkSupportForNode(node planNode) (distRecommendatio
 
 	case *renderNode:
 		for i, e := range n.render {
-			if typ := n.columns[i].Typ; typ.FamilyEqual(parser.TypeTuple) ||
-				typ.FamilyEqual(parser.TypeArray) {
+			typ := n.columns[i].Typ
+			if leafType(typ).FamilyEqual(parser.TypeTuple) {
 				return 0, newQueryNotSupportedErrorf("unsupported render type %s", typ)
 			}
 			if err := dsp.checkExpr(e); err != nil {
@@ -396,7 +406,7 @@ func (p *planningCtx) sanityCheckAddresses() error {
 		if otherNodeID, ok := inverted[addr]; ok {
 			return util.UnexpectedWithIssueErrorf(
 				12876,
-				"different nodes with the same address: %d and %d", nodeID, otherNodeID)
+				"different nodes %d and %d with the same address '%s'", nodeID, otherNodeID, addr)
 		}
 		inverted[addr] = nodeID
 	}
@@ -531,22 +541,38 @@ func (dsp *distSQLPlanner) partitionSpans(
 				addr, inAddrMap := planCtx.nodeAddresses[nodeID]
 				if !inAddrMap {
 					addr = replInfo.NodeDesc.Address.String()
-					var err error
-					if dsp.testingKnobs.OverrideHealthCheck != nil {
-						err = dsp.testingKnobs.OverrideHealthCheck(replInfo.NodeDesc.NodeID, addr)
-					} else {
-						err = dsp.rpcContext.ConnHealth(addr)
+					checkNodeHealth := func() error {
+						// Check if the node is still in gossip - i.e. if it hasn't been
+						// decommissioned or overridden by another node at the same address.
+						if _, err := dsp.gossip.GetNodeIDAddress(nodeID); err != nil {
+							log.VEventf(ctx, 1, "not using n%d because gossip doesn't know about it. "+
+								"It might have gone away from the cluster. Gossip said: %s.", nodeID, err)
+							return err
+						}
+
+						var err error
+						if dsp.testingKnobs.OverrideHealthCheck != nil {
+							err = dsp.testingKnobs.OverrideHealthCheck(replInfo.NodeDesc.NodeID, addr)
+						} else {
+							err = dsp.rpcContext.ConnHealth(addr)
+						}
+						if err != nil && err != rpc.ErrNotConnected && err != rpc.ErrNotHeartbeated {
+							// This host is known to be unhealthy. Don't use it (use the gateway
+							// instead). Note: this can never happen for our nodeID (which
+							// always has its address in the nodeMap).
+							log.VEventf(ctx, 1, "marking n%d as unhealthy for this plan: %v", nodeID, err)
+							return err
+						}
+						return nil
 					}
-					if err != nil && err != rpc.ErrNotConnected && err != rpc.ErrNotHeartbeated {
-						// This host is known to be unhealthy. Don't use it (use the gateway
-						// instead). Note: this can never happen for our nodeID (which
-						// always has its address in the nodeMap).
+					if err := checkNodeHealth(); err != nil {
 						addr = ""
-						log.VEventf(ctx, 1, "marking node %d as unhealthy for this plan: %v", nodeID, err)
 					}
-					planCtx.nodeAddresses[nodeID] = addr
+					if err == nil && addr != "" {
+						planCtx.nodeAddresses[nodeID] = addr
+					}
 				}
-				var compat bool
+				compat := true
 				if addr != "" {
 					// Check if the node's DistSQL version is compatible with this plan.
 					// If it isn't, we'll use the gateway.
@@ -603,15 +629,8 @@ func (dsp *distSQLPlanner) nodeVersionIsCompatible(
 	nodeID roachpb.NodeID, planVer distsqlrun.DistSQLVersion,
 ) bool {
 	var v distsqlrun.DistSQLVersionGossipInfo
-	if hook := dsp.testingKnobs.OverrideDistSQLVersionCheck; hook != nil {
-		var err error
-		if v, err = hook(nodeID); err != nil {
-			return false
-		}
-	} else {
-		if err := dsp.gossip.GetInfoProto(gossip.MakeDistSQLNodeVersionKey(nodeID), &v); err != nil {
-			return false
-		}
+	if err := dsp.gossip.GetInfoProto(gossip.MakeDistSQLNodeVersionKey(nodeID), &v); err != nil {
+		return false
 	}
 	return distsqlrun.FlowVerIsCompatible(dsp.planVersion, v.MinAcceptedVersion, v.Version)
 }
@@ -889,14 +908,8 @@ func (b *RowResultWriter) AddRow(ctx context.Context, row parser.Datums) error {
 	return err
 }
 
-// LoadCSV TODO(dan): This entire method is a placeholder to get the distsql
-// plumbing worked out while mjibson works on the new processors and router. The
-// intention is to manually create the distsql plan, so we can have control over
-// where the work is scheduled, but then use the normal distsql machinery for
-// everything else. Currently, it runs a very simple flow just to make sure
-// everything gets set up correctly. It is in no way representative of the
-// actual flow that will be used for csv -> BACKUP, but is enough to get the
-// flow setup worked out.
+// LoadCSV performs a distributed transformation of the CSV files at from
+// and stores them in enterprise backup format at to.
 func (l *DistLoader) LoadCSV(
 	ctx context.Context,
 	job *jobs.Job,
@@ -911,12 +924,25 @@ func (l *DistLoader) LoadCSV(
 	comma, comment rune,
 	nullif *string,
 	walltime int64,
+	splitSize int64,
 ) error {
-	const (
-		splitSize  = 1024 * 1024 * 32 // 32MB
-		oversample = 3
-		sampleSize = splitSize / oversample
-	)
+	// splitSize is the target number of bytes at which to create SST files. We
+	// attempt to do this by sampling, which is what the first DistSQL plan of this
+	// function does. CSV rows are converted into KVs. The total size of the KV is
+	// used to determine if we should sample it or not. For example, if we had a
+	// 100 byte KV and a 30MB splitSize, we would sample the KV with probability
+	// 100/30000000. Over many KVs, this produces samples at approximately the
+	// correct spacing, but obviously also with some error. We use oversample
+	// below to decrease the error. We divide the splitSize by oversample to
+	// produce the actual sampling rate. So in the example above, oversampling by a
+	// factor of 3 would sample the KV with probability 100/10000000 since we are
+	// sampling at 3x. Since we're now getting back 3x more samples than needed,
+	// we only use every 1/(oversample), or 1/3 here, in our final sampling.
+	const oversample = 3
+	sampleSize := splitSize / oversample
+	if sampleSize > math.MaxInt32 {
+		return errors.Errorf("SST size must fit in an int32: %d", splitSize)
+	}
 
 	var p physicalPlan
 	colTypeBytes := sqlbase.ColumnType{SemanticType: sqlbase.ColumnType_BYTES}
@@ -926,7 +952,7 @@ func (l *DistLoader) LoadCSV(
 	for i, input := range from {
 		// TODO(mjibson): attempt to intelligently schedule http files to matching cockroach nodes
 		rcs := distsqlrun.ReadCSVSpec{
-			SampleSize: sampleSize,
+			SampleSize: int32(sampleSize),
 			TableDesc:  *tableDesc,
 			Uri:        input,
 			Options: roachpb.CSVOptions{

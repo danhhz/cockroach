@@ -18,7 +18,6 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
-	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -177,6 +176,19 @@ func (p *planner) truncateTable(ctx context.Context, id sqlbase.ID, traceKV bool
 	if err := newTableDesc.SetUpVersion(); err != nil {
 		return err
 	}
+	// Resolve all outstanding mutations. Make all new schema elements
+	// public because the table is empty and doesn't need to be backfilled.
+	for _, m := range newTableDesc.Mutations {
+		if m.Direction == sqlbase.DescriptorMutation_ADD {
+			if col := m.GetColumn(); col != nil {
+				newTableDesc.Columns = append(newTableDesc.Columns, *col)
+			}
+			if idx := m.GetIndex(); idx != nil {
+				newTableDesc.Indexes = append(newTableDesc.Indexes, *idx)
+			}
+		}
+	}
+	newTableDesc.Mutations = nil
 	tKey := tableKey{parentID: newTableDesc.ParentID, name: newTableDesc.Name}
 	key := tKey.Key()
 	if err := p.createDescriptorWithID(ctx, key, newID, &newTableDesc); err != nil {
@@ -185,7 +197,6 @@ func (p *planner) truncateTable(ctx context.Context, id sqlbase.ID, traceKV bool
 	p.notifySchemaChange(&newTableDesc, sqlbase.InvalidMutationID)
 
 	// Copy the zone config.
-	newZoneKey := sqlbase.MakeZoneKey(newID)
 	b = &client.Batch{}
 	b.Get(zoneKey)
 	if err := p.txn.Run(ctx, b); err != nil {
@@ -195,13 +206,13 @@ func (p *planner) truncateTable(ctx context.Context, id sqlbase.ID, traceKV bool
 	if val == nil {
 		return nil
 	}
-	zoneCfg, err := config.MigrateZoneConfig(val)
+	zoneCfg, err := val.GetBytes()
 	if err != nil {
 		return err
 	}
-	b = &client.Batch{}
-	b.CPut(newZoneKey, zoneCfg, nil)
-	return p.txn.Run(ctx, b)
+	const insertZoneCfg = `INSERT INTO system.zones (id, config) VALUES ($1, $2)`
+	_, err = p.exec(ctx, insertZoneCfg, newID, zoneCfg)
+	return err
 }
 
 // For all the references from a table

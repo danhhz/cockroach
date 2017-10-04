@@ -41,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/util/caller"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/petermattis/goid"
 )
 
@@ -343,7 +344,7 @@ func (d *EntryDecoder) Decode(entry *Entry) error {
 			continue
 		}
 		entry.Severity = Severity(strings.IndexByte(severityChar, m[1][0]) + 1)
-		t, err := time.ParseInLocation("060102 15:04:05.999999", string(m[2]), time.Local)
+		t, err := time.Parse("060102 15:04:05.999999", string(m[2]))
 		if err != nil {
 			return err
 		}
@@ -554,7 +555,7 @@ func (buf *buffer) someDigits(i, d int) int {
 }
 
 func formatLogEntry(entry Entry, stacks []byte, colors *colorProfile) *buffer {
-	buf := formatHeader(entry.Severity, time.Unix(0, entry.Time),
+	buf := formatHeader(entry.Severity, timeutil.Unix(0, entry.Time),
 		int(entry.Goroutine), entry.File, int(entry.Line), colors)
 	_, _ = buf.WriteString(entry.Message)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
@@ -716,7 +717,7 @@ func (l *loggingT) putBuffer(b *buffer) {
 // are added to the entry before marshaling.
 func (l *loggingT) outputLogEntry(s Severity, file string, line int, msg string) {
 	// Set additional details in log entry.
-	now := time.Now()
+	now := timeutil.Now()
 	entry := MakeEntry(s, now.UnixNano(), file, line, msg)
 
 	if f, ok := l.interceptor.Load().(InterceptorFn); ok && f != nil {
@@ -877,7 +878,7 @@ func (sb *syncBuffer) Sync() error {
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 	if sb.nbytes+int64(len(p)) >= atomic.LoadInt64(&LogFileMaxSize) {
-		if err := sb.rotateFile(time.Now()); err != nil {
+		if err := sb.rotateFile(timeutil.Now()); err != nil {
 			sb.logger.exit(err)
 		}
 	}
@@ -975,7 +976,7 @@ func (l *loggingT) closeFileLocked() error {
 // createFile creates the log file.
 // l.mu is held.
 func (l *loggingT) createFile() error {
-	now := time.Now()
+	now := timeutil.Now()
 	if l.file == nil {
 		sb := &syncBuffer{
 			logger: l,

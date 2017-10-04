@@ -284,8 +284,8 @@ SELECT timestamp,
        operation,
        span
   FROM (SELECT timestamp,
-               regexp_replace(message, e'^.*\\[[^]]*\\] ', '') AS message,
-               regexp_extract(message, e'^.*\\[[^]]*\\]') AS context,
+               regexp_replace(message, e'^\\[(?:[^][]|\\[[^]]*\\])*\\] ', '') AS message,
+               regexp_extract(message, e'^\\[(?:[^][]|\\[[^]]*\\])*\\]') AS context,
                first_value(operation) OVER (PARTITION BY txn_idx, span_idx ORDER BY message_idx) as operation,
                (txn_idx, span_idx) AS span
           FROM crdb_internal.session_trace)
@@ -301,6 +301,7 @@ WHERE message LIKE 'fetched: %'
    OR message LIKE 'DelRange %'
    OR message LIKE 'Del %'
    OR message LIKE 'Get %'
+   OR message LIKE 'Scan %'
    OR message = 'consuming rows'
    OR message = 'starting plan'
    OR message LIKE 'fast path - %'
@@ -600,7 +601,11 @@ func (p *planner) ShowQueries(ctx context.Context, n *parser.ShowQueries) (planN
 // ShowJobs returns all the jobs.
 // Privileges: None.
 func (p *planner) ShowJobs(ctx context.Context, n *parser.ShowJobs) (planNode, error) {
-	return p.delegateQuery(ctx, "SHOW JOBS", "TABLE crdb_internal.jobs", nil, nil)
+	return p.delegateQuery(ctx, "SHOW JOBS",
+		`SELECT id, type, description, username, status, created, started, finished, modified,
+            fraction_completed, error, coordinator_id
+       FROM crdb_internal.jobs`,
+		nil, nil)
 }
 
 func (p *planner) ShowSessions(ctx context.Context, n *parser.ShowSessions) (planNode, error) {

@@ -16,7 +16,6 @@ package distsqlrun
 
 import (
 	"io"
-	"time"
 
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
@@ -37,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
@@ -70,40 +70,31 @@ type DistSQLVersion uint32
 //
 // ATTENTION: When updating these fields, add to version_history.txt explaining
 // what changed.
-const Version DistSQLVersion = 5
+const Version DistSQLVersion = 6
 
 // MinAcceptedVersion is the oldest version that the server is
 // compatible with; see above.
-const MinAcceptedVersion DistSQLVersion = 4
+const MinAcceptedVersion DistSQLVersion = 6
 
-var distSQLUseTempStorage = settings.RegisterBoolSetting(
-	"sql.defaults.distsql.tempstorage",
-	"set to true to enable use of disk for larger distributed sql queries",
+var settingUseTempStorageSorts = settings.RegisterBoolSetting(
+	"sql.distsql.temp_storage.sorts",
+	"set to true to enable use of disk for distributed sql sorts",
 	true,
 )
 
-var distSQLUseTempStorageSorts = settings.RegisterBoolSetting(
-	"sql.defaults.distsql.tempstorage.sorts",
-	"set to true to enable use of disk for distributed sql sorts. sql.defaults.distsql.tempstorage must be true",
+var settingUseTempStorageJoins = settings.RegisterBoolSetting(
+	"sql.distsql.temp_storage.joins",
+	"set to true to enable use of disk for distributed sql joins",
 	true,
 )
 
-var distSQLUseTempStorageJoins = settings.RegisterBoolSetting(
-	"sql.defaults.distsql.tempstorage.joins",
-	"set to true to enable use of disk for distributed sql joins. sql.defaults.distsql.tempstorage must be true",
-	true,
+var settingWorkMemBytes = settings.RegisterByteSizeSetting(
+	"sql.distsql.temp_storage.workmem",
+	"maximum amount of memory in bytes a processor can use before falling back to temp storage",
+	64*1024*1024, /* 64MB */
 )
-
-// workMemBytes specifies the maximum amount of memory in bytes a processor can
-// use. This limit is only observed if the use of temporary storage is enabled
-// (see sql.defaults.distsql.tempstorage).
-var workMemBytes = envutil.EnvOrDefaultInt64("COCKROACH_WORK_MEM", 64*1024*1024 /* 64MB */)
 
 var noteworthyMemoryUsageBytes = envutil.EnvOrDefaultInt64("COCKROACH_NOTEWORTHY_DISTSQL_MEMORY_USAGE", 1024*1024 /* 1MB */)
-
-// All queries that spill over to disk will be limited to use
-// total space / diskBudgetTotalSizeDivisor.
-const diskBudgetTotalSizeDivisor = 4
 
 // ServerConfig encompasses the configuration required to create a
 // DistSQLServer.
@@ -127,7 +118,8 @@ type ServerConfig struct {
 
 	// TempStorage is used by some DistSQL processors to store rows when the
 	// working set is larger than can be stored in memory.
-	TempStorage engine.Engine
+	TempStorage             engine.Engine
+	TempStorageMaxSizeBytes int64
 
 	Metrics *DistSQLMetrics
 
@@ -179,23 +171,15 @@ func NewServer(ctx context.Context, cfg ServerConfig) *ServerImpl {
 	}
 	ds.memMonitor.Start(ctx, cfg.ParentMemoryMonitor, mon.BoundAccount{})
 
-	capacity, err := ds.tempStorage.Capacity()
-	if err != nil {
-		log.Fatal(
-			ctx,
-			errors.Wrap(err, "could not get temporary storage capacity"),
-		)
-	}
-	diskMonitorBudget := capacity.Capacity / diskBudgetTotalSizeDivisor
 	ds.diskMonitor = mon.MakeMonitor(
 		"distsql-tempstorage",
 		mon.DiskResource,
-		nil,                 /* curCount */
-		nil,                 /* maxHist */
-		workMemBytes,        /* increment: same size as processor's memory budget */
-		diskMonitorBudget/2, /* noteworthy */
+		nil,                            /* curCount */
+		nil,                            /* maxHist */
+		64*1024*1024,                   /* increment */
+		cfg.TempStorageMaxSizeBytes/10, /* noteworthy */
 	)
-	ds.diskMonitor.Start(ctx, nil, mon.MakeStandaloneBudget(diskMonitorBudget))
+	ds.diskMonitor.Start(ctx, nil, mon.MakeStandaloneBudget(cfg.TempStorageMaxSizeBytes))
 	return ds
 }
 
@@ -267,7 +251,7 @@ func (ds *ServerImpl) setupFlow(
 	acc := monitor.MakeBoundAccount()
 
 	// The flow will run in a Txn that bypasses the local TxnCoordSender.
-	txn := client.NewTxnWithProto(ds.FlowDB, req.Txn)
+	txn := client.NewTxnWithProto(ds.FlowDB, req.Flow.Gateway, req.Txn)
 	// DistSQL transactions get retryable errors that would otherwise be handled
 	// by the TxnCoordSender.
 	txn.AcceptUnhandledRetryableErrors()
@@ -294,8 +278,8 @@ func (ds *ServerImpl) setupFlow(
 		},
 		Txn: txn,
 	}
-	evalCtx.SetStmtTimestamp(time.Unix(0 /* sec */, req.EvalContext.StmtTimestampNanos))
-	evalCtx.SetTxnTimestamp(time.Unix(0 /* sec */, req.EvalContext.TxnTimestampNanos))
+	evalCtx.SetStmtTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.StmtTimestampNanos))
+	evalCtx.SetTxnTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.TxnTimestampNanos))
 	evalCtx.SetClusterTimestamp(req.EvalContext.ClusterTimestamp)
 
 	// TODO(radu): we should sanity check some of these fields (especially

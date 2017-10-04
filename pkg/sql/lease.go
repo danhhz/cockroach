@@ -38,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 // TODO(pmattis): Periodically renew leases for tables that were used recently and
@@ -107,7 +108,7 @@ func (s *tableVersionState) incRefcountLocked() {
 // hlc.Timestamp, so we're using this method to give us the stored
 // type: parser.DTimestamp.
 func (s *tableVersionState) leaseExpiration() parser.DTimestamp {
-	return parser.DTimestamp{Time: time.Unix(0, s.expiration.WallTime).Round(time.Microsecond)}
+	return parser.DTimestamp{Time: timeutil.Unix(0, s.expiration.WallTime).Round(time.Microsecond)}
 }
 
 // LeaseStore implements the operations for acquiring and releasing leases and
@@ -418,7 +419,7 @@ func (s LeaseStore) getForExpiration(
 		descKey := sqlbase.MakeDescMetadataKey(id)
 		prevTimestamp := expiration
 		prevTimestamp.WallTime--
-		txn.SetFixedTimestamp(prevTimestamp)
+		txn.SetFixedTimestamp(ctx, prevTimestamp)
 		var desc sqlbase.Descriptor
 		if err := txn.GetProto(ctx, descKey, &desc); err != nil {
 			return err
@@ -573,10 +574,13 @@ func (t *tableState) acquire(
 ) (*tableVersionState, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Wait for any existing lease acquisition.
+	t.acquireWait()
+
 	// Acquire a lease if no lease exists or if the latest lease is
 	// about to expire.
 	if s := t.mu.active.findNewest(); s == nil || s.hasExpired(timestamp) {
-		if err := t.acquireFromStoreLocked(ctx, m); err != nil {
+		if err := t.acquireNodeLease(ctx, m, hlc.Timestamp{}); err != nil {
 			return nil, err
 		}
 	}
@@ -587,8 +591,7 @@ func (t *tableState) acquire(
 // ensureVersion ensures that the latest version >= minVersion. It will
 // check if the latest known version meets the criterion, or attempt to
 // acquire a lease at the latest version with the hope that it meets
-// the criterion. acquireFromStoreLocked() returns an error if it
-// is unable to acquire a lease meeting the criterion.
+// the criterion.
 func (t *tableState) ensureVersion(
 	ctx context.Context, minVersion sqlbase.DescriptorVersion, m *LeaseManager,
 ) error {
@@ -599,7 +602,7 @@ func (t *tableState) ensureVersion(
 		return nil
 	}
 
-	if err := t.acquireFromStoreLocked(ctx, m); err != nil {
+	if err := t.acquireFreshestFromStoreLocked(ctx, m); err != nil {
 		return err
 	}
 
@@ -682,25 +685,6 @@ func (t *tableState) findForTimestamp(
 	return table, nil
 }
 
-// acquireFromStoreLocked acquires a new lease from the store and inserts it
-// into the active set. t.mu must be locked. If the table descriptor version
-// doesn't exist an error is returned (the descriptor version >= minVersion).
-func (t *tableState) acquireFromStoreLocked(ctx context.Context, m *LeaseManager) error {
-	// Ensure there is no lease acquisition in progress.
-	if t.acquireWait() {
-		// There was a lease acquisition in progress; accept the lease just
-		// acquired.
-		return nil
-	}
-
-	s, err := t.acquireNodeLease(ctx, m, hlc.Timestamp{})
-	if err != nil {
-		return err
-	}
-	t.upsertLocked(ctx, s, m)
-	return nil
-}
-
 // acquireFreshestFromStoreLocked acquires a new lease from the store and
 // inserts it into the active set. It guarantees that the lease returned is
 // the one acquired after the call is made. Use this if the lease we want to
@@ -726,12 +710,7 @@ func (t *tableState) acquireFreshestFromStoreLocked(ctx context.Context, m *Leas
 		minExpirationTime = newestTable.expiration.Add(int64(time.Millisecond), 0)
 	}
 
-	s, err := t.acquireNodeLease(ctx, m, minExpirationTime)
-	if err != nil {
-		return err
-	}
-	t.upsertLocked(ctx, s, m)
-	return nil
+	return t.acquireNodeLease(ctx, m, minExpirationTime)
 }
 
 // upsertLocked inserts a lease for a particular table version.
@@ -778,20 +757,16 @@ func (t *tableState) removeInactiveVersions(m *LeaseManager) {
 	}
 }
 
-// acquireWait waits until no lease acquisition is in progress. It returns
-// true if it needed to wait.
-func (t *tableState) acquireWait() bool {
-	wait := t.mu.acquiring != nil
+// acquireWait waits until no lease acquisition is in progress.
+func (t *tableState) acquireWait() {
 	// Spin until no lease acquisition is in progress.
-	for t.mu.acquiring != nil {
+	for acquiring := t.mu.acquiring; acquiring != nil; acquiring = t.mu.acquiring {
 		// We're called with mu locked, but need to unlock it while we wait
 		// for the in-progress lease acquisition to finish.
-		acquiring := t.mu.acquiring
 		t.mu.Unlock()
 		<-acquiring
 		t.mu.Lock()
 	}
-	return wait
 }
 
 // If the lease cannot be obtained because the descriptor is in the process of
@@ -805,9 +780,9 @@ func (t *tableState) acquireWait() bool {
 // t.mu needs to be locked.
 func (t *tableState) acquireNodeLease(
 	ctx context.Context, m *LeaseManager, minExpirationTime hlc.Timestamp,
-) (*tableVersionState, error) {
+) error {
 	if m.isDraining() {
-		return nil, errors.New("cannot acquire lease when draining")
+		return errors.New("cannot acquire lease when draining")
 	}
 
 	// Notify when lease has been acquired.
@@ -819,13 +794,14 @@ func (t *tableState) acquireNodeLease(
 	// We're called with mu locked, but need to unlock it during lease
 	// acquisition.
 	t.mu.Unlock()
-	defer t.mu.Lock()
 	table, err := m.LeaseStore.acquire(ctx, t.id, minExpirationTime)
+	t.mu.Lock()
 	if err != nil {
-		return nil, err
+		return err
 	}
+	t.upsertLocked(ctx, table, m)
 	t.tableNameCache.insert(table)
-	return table, nil
+	return nil
 }
 
 func (t *tableState) release(table *sqlbase.TableDescriptor, m *LeaseManager) error {
@@ -1247,20 +1223,25 @@ func (m *LeaseManager) resolveName(
 ) (sqlbase.ID, error) {
 	nameKey := tableKey{dbID, tableName}
 	key := nameKey.Key()
-	var id sqlbase.ID
-	err := m.db.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
-		txn.SetFixedTimestamp(timestamp)
+	id := sqlbase.InvalidID
+	if err := m.db.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
+		txn.SetFixedTimestamp(ctx, timestamp)
 		gr, err := txn.Get(ctx, key)
 		if err != nil {
 			return err
 		}
 		if !gr.Exists() {
-			return sqlbase.ErrDescriptorNotFound
+			return nil
 		}
 		id = sqlbase.ID(gr.ValueInt())
 		return nil
-	})
-	return id, err
+	}); err != nil {
+		return id, err
+	}
+	if id == sqlbase.InvalidID {
+		return id, sqlbase.ErrDescriptorNotFound
+	}
+	return id, nil
 }
 
 // Acquire acquires a read lease for the specified table ID valid for

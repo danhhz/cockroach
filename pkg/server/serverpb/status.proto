@@ -21,7 +21,7 @@ import "cockroach/pkg/gossip/gossip.proto";
 import "cockroach/pkg/roachpb/data.proto";
 import "cockroach/pkg/server/status/status.proto";
 import "cockroach/pkg/storage/engine/enginepb/mvcc.proto";
-import "cockroach/pkg/storage/log.proto";
+import "cockroach/pkg/storage/lease_status.proto";
 import "cockroach/pkg/storage/storagebase/state.proto";
 import "cockroach/pkg/util/log/log.proto";
 import "cockroach/pkg/util/unresolved_addr.proto";
@@ -175,6 +175,7 @@ message RangeInfo {
   RangeStatistics stats = 10 [(gogoproto.nullable) = false];
   CommandQueueMetrics cmd_q_local = 11 [(gogoproto.nullable) = false];
   CommandQueueMetrics cmd_q_global = 12 [(gogoproto.nullable) = false];
+  storage.LeaseStatus lease_status = 13 [(gogoproto.nullable) = false];
 }
 
 message RangesRequest {
@@ -482,22 +483,6 @@ message RangeResponse {
     string error_message = 2;
     repeated RangeInfo infos = 3 [(gogoproto.nullable) = false];
   }
-  message RangeLog {
-    // To avoid porting the pretty printing of keys and descriptors to
-    // javascript, they will be precomputed on the serverside.
-    message PrettyInfo {
-      string updated_desc = 1;
-      string new_desc = 2;
-      string added_replica = 3;
-      string removed_replica = 4;
-      string reason = 5;
-      string details = 6;
-    }
-    repeated storage.RangeLogEvent events = 1 [(gogoproto.nullable) = false];
-    repeated PrettyInfo pretty_infos = 2 [(gogoproto.nullable) = false];
-    string error_message = 3;
-  }
-
   // NodeID is the node that submitted all the requests.
   int32 node_id = 1 [
     (gogoproto.customname) = "NodeID",
@@ -512,7 +497,7 @@ message RangeResponse {
     (gogoproto.customname) = "ResponsesByNodeID",
     (gogoproto.nullable) = false
   ];
-  RangeLog range_log = 4 [(gogoproto.nullable) = false];
+  reserved 4; // Previously used.
 }
 
 service Status {

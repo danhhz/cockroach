@@ -61,6 +61,9 @@ var errSideloadedFileNotFound = errors.New("sideloaded file not found")
 // sideloadStorage is the interface used for Raft SSTable sideloading.
 // Implementations do not need to be thread safe.
 type sideloadStorage interface {
+	// The directory in which the sideloaded files are stored. May or may not
+	// exist.
+	Dir() string
 	// Writes the given contents to the file specified by the given index and
 	// term. Does not perform the write if the file exists.
 	PutIfNotExists(_ context.Context, index, term uint64, contents []byte) error
@@ -229,12 +232,20 @@ func maybeInlineSideloadedRaftCommand(
 	log.Event(ctx, "inlined entry not cached")
 	// Out of luck, for whatever reason the inlined proposal isn't in the cache.
 	cmdID, data := DecodeRaftCommand(ent.Data)
-	ent.Data = nil // no reuse of potentially shared slice
 
 	var command storagebase.RaftCommand
 	if err := command.Unmarshal(data); err != nil {
 		return nil, err
 	}
+
+	if len(command.ReplicatedEvalResult.AddSSTable.Data) > 0 {
+		// The entry we started out with was already "fat". This happens when
+		// the entry reached us through a preemptive snapshot (when we didn't
+		// have a ReplicaID yet).
+		log.Event(ctx, "entry already inlined")
+		return &ent, nil
+	}
+
 	sideloadedData, err := sideloaded.Get(ctx, ent.Index, ent.Term)
 	if err != nil {
 		return nil, errors.Wrap(err, "loading sideloaded data")

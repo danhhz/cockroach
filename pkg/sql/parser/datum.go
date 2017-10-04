@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
@@ -422,7 +423,16 @@ func (*DInt) AmbiguousFormat() bool { return true }
 
 // Format implements the NodeFormatter interface.
 func (d *DInt) Format(buf *bytes.Buffer, f FmtFlags) {
+	// If the number is negative, we need to use parens or the `:::INT` type hint
+	// will take precedence over the negation sign.
+	quote := f.disambiguateDatumTypes && *d < 0
+	if quote {
+		buf.WriteByte('(')
+	}
 	buf.WriteString(strconv.FormatInt(int64(*d), 10))
+	if quote {
+		buf.WriteByte(')')
+	}
 }
 
 // Size implements the Datum interface.
@@ -1076,7 +1086,13 @@ func (*DUuid) AmbiguousFormat() bool { return false }
 
 // Format implements the NodeFormatter interface.
 func (d *DUuid) Format(buf *bytes.Buffer, f FmtFlags) {
-	encodeSQLString(buf, d.UUID.String())
+	if !f.bareStrings {
+		buf.WriteByte('\'')
+	}
+	buf.WriteString(d.UUID.String())
+	if !f.bareStrings {
+		buf.WriteByte('\'')
+	}
 }
 
 // Size implements the Datum interface.
@@ -1182,7 +1198,7 @@ func (d *DDate) Format(buf *bytes.Buffer, f FmtFlags) {
 	if !f.bareStrings {
 		buf.WriteByte('\'')
 	}
-	buf.WriteString(time.Unix(int64(*d)*secondsInDay, 0).UTC().Format(dateFormat))
+	buf.WriteString(timeutil.Unix(int64(*d)*secondsInDay, 0).UTC().Format(dateFormat))
 	if !f.bareStrings {
 		buf.WriteByte('\'')
 	}
@@ -1435,7 +1451,7 @@ func MakeDTimestampTZ(t time.Time, precision time.Duration) *DTimestampTZ {
 
 // MakeDTimestampTZFromDate creates a DTimestampTZ from a DDate.
 func MakeDTimestampTZFromDate(loc *time.Location, d *DDate) *DTimestampTZ {
-	year, month, day := time.Unix(int64(*d)*secondsInDay, 0).UTC().Date()
+	year, month, day := timeutil.Unix(int64(*d)*secondsInDay, 0).UTC().Date()
 	return MakeDTimestampTZ(time.Date(year, month, day, 0, 0, 0, 0, loc), time.Microsecond)
 }
 

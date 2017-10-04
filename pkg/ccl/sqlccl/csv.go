@@ -24,11 +24,14 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsqlrun"
@@ -124,13 +127,18 @@ func LoadCSV(
 		}
 	}()
 
+	fileLimit, err := server.SetOpenFileLimitForOneStore()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
 	cache := engine.NewRocksDBCache(0)
 	defer cache.Release()
 	r, err := engine.NewRocksDB(engine.RocksDBConfig{
 		Settings:     cluster.MakeTestingClusterSettings(),
 		Dir:          rocksdbDir,
 		MaxSizeBytes: 0,
-		MaxOpenFiles: 1024,
+		MaxOpenFiles: fileLimit,
 	}, cache)
 	if err != nil {
 		return 0, 0, 0, errors.Wrap(err, "create rocksdb instance")
@@ -138,7 +146,7 @@ func LoadCSV(
 	defer r.Close()
 
 	return doLocalCSVTransform(
-		ctx, nil, parentID, tableDesc, dest, dataFiles, comma, comment, nullif, sstMaxSize, r, walltime,
+		ctx, nil, parentID, tableDesc, dest, dataFiles, comma, comment, nullif, sstMaxSize, r, walltime, nil,
 	)
 }
 
@@ -154,15 +162,27 @@ func doLocalCSVTransform(
 	sstMaxSize int64,
 	tempEngine engine.Engine,
 	walltime int64,
+	execCfg *sql.ExecutorConfig,
 ) (csvCount, kvCount, sstCount int64, err error) {
 	// Some channels are buffered because reads happen in bursts, so having lots
 	// of pre-computed data improves overall performance.
 	const chanSize = 10000
 
-	group, gCtx := errgroup.WithContext(ctx)
 	recordCh := make(chan csvRecord, chanSize)
 	kvCh := make(chan roachpb.KeyValue, chanSize)
 	contentCh := make(chan sstContent)
+	var backupDesc *BackupDescriptor
+	conf, err := storageccl.ExportStorageConfFromURI(dest)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	es, err := storageccl.MakeExportStorage(ctx, conf)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer es.Close()
+
+	group, gCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		defer close(recordCh)
 		var err error
@@ -193,10 +213,16 @@ func doLocalCSVTransform(
 	})
 	group.Go(func() error {
 		var err error
-		sstCount, err = makeBackup(gCtx, parentID, tableDesc, dest, contentCh, walltime)
+		backupDesc, err = makeBackup(gCtx, contentCh, walltime, es)
 		return err
 	})
-	return csvCount, kvCount, sstCount, group.Wait()
+	if err := group.Wait(); err != nil {
+		return 0, 0, 0, err
+	}
+	err = finalizeCSVBackup(ctx, backupDesc, parentID, tableDesc, es, execCfg)
+	sstCount = int64(len(backupDesc.Files))
+
+	return csvCount, kvCount, sstCount, err
 }
 
 const (
@@ -236,6 +262,7 @@ func readCreateTableFromStore(ctx context.Context, filename string) (*parser.Cre
 func makeCSVTableDescriptor(
 	ctx context.Context, create *parser.CreateTable, parentID, tableID sqlbase.ID, walltime int64,
 ) (*sqlbase.TableDescriptor, error) {
+	sql.HoistConstraints(create)
 	if create.IfNotExists {
 		return nil, errors.New("unsupported IF NOT EXISTS")
 	}
@@ -245,7 +272,23 @@ func makeCSVTableDescriptor(
 	if create.AsSource != nil {
 		return nil, errors.New("CREATE AS not supported")
 	}
-	// TODO(mjibson): error on FKs
+	for _, def := range create.Defs {
+		switch def := def.(type) {
+		case *parser.CheckConstraintTableDef,
+			*parser.FamilyTableDef,
+			*parser.IndexTableDef,
+			*parser.UniqueConstraintTableDef:
+			// ignore
+		case *parser.ColumnTableDef:
+			if def.DefaultExpr.Expr != nil {
+				return nil, errors.Errorf("DEFAULT expressions not supported: %s", parser.AsString(def))
+			}
+		case *parser.ForeignKeyConstraintTableDef:
+			return nil, errors.Errorf("foreign keys not supported: %s", parser.AsString(def))
+		default:
+			return nil, errors.Errorf("unsupported table definition: %s", parser.AsString(def))
+		}
+	}
 	tableDesc, err := sql.MakeTableDesc(
 		ctx,
 		nil, /* txn */
@@ -262,13 +305,6 @@ func makeCSVTableDescriptor(
 	)
 	if err != nil {
 		return nil, err
-	}
-
-	visibleCols := tableDesc.VisibleColumns()
-	for _, col := range visibleCols {
-		if col.DefaultExpr != nil {
-			return nil, errors.Errorf("column %q: DEFAULT expression unsupported", col.Name)
-		}
 	}
 
 	return &tableDesc, nil
@@ -506,10 +542,24 @@ func writeRocksDB(
 	}
 
 	var kv engine.MVCCKeyValue
-	kv.Key.Timestamp.WallTime = timeutil.Now().UnixNano()
+	kv.Key.Timestamp.WallTime = walltime
+	// firstKey is always the first key of the span. lastKey, if nil, means the
+	// current SST hasn't yet filled up. Once the SST has filled up, lastKey is
+	// set to the key at which to stop adding KVs. We have to do this because
+	// all column families for a row must be in one SST and the SST may have
+	// filled up with only some of the KVs from the column families being added.
 	var firstKey, lastKey roachpb.Key
 	var count int64
-	for it.Rewind(); ; it.Next() {
+
+	it.Rewind()
+	if ok, err := it.Valid(); err != nil {
+		return 0, err
+	} else if !ok {
+		return 0, errors.New("could not get first key")
+	}
+	firstKey = it.Key()
+
+	for ; ; it.Next() {
 		if ok, err := it.Valid(); err != nil {
 			return 0, err
 		} else if !ok {
@@ -517,35 +567,34 @@ func writeRocksDB(
 		}
 		count++
 
-		// Save the first key for the span.
-		if firstKey == nil {
-			firstKey = it.Key()
+		kv.Key.Key = it.UnsafeKey()
+		kv.Value = it.UnsafeValue()
+		if lastKey != nil {
+			if kv.Key.Key.Compare(lastKey) >= 0 {
+				if err := writeSST(firstKey, lastKey); err != nil {
+					return 0, err
+				}
+				firstKey = it.Key()
+				lastKey = nil
 
-			// Ensure the first key doesn't match the last key of the previous SST.
-			if firstKey.Equal(lastKey) {
-				return 0, errors.Errorf("duplicate key: %s", firstKey)
+				sst, err = engine.MakeRocksDBSstFileWriter()
+				if err != nil {
+					return 0, err
+				}
+				defer sst.Close()
 			}
 		}
-
-		kv.Key.Key = it.UnsafeKey()
-		kv.Key.Timestamp.WallTime = walltime
-		kv.Value = it.UnsafeValue()
-
 		if err := sst.Add(kv); err != nil {
 			return 0, errors.Wrapf(err, errSSTCreationMaybeDuplicateTemplate, kv.Key.Key)
 		}
-		if sst.DataSize > sstMaxSize {
-			if err := writeSST(firstKey, kv.Key.Key.Next()); err != nil {
-				return 0, err
-			}
-			firstKey = nil
-			lastKey = append([]byte(nil), kv.Key.Key...)
-
-			sst, err = engine.MakeRocksDBSstFileWriter()
+		if sst.DataSize > sstMaxSize && lastKey == nil {
+			// When we would like to split the file, proceed until we aren't in the
+			// middle of a row. Start by finding the next safe split key.
+			lastKey, err = keys.EnsureSafeSplitKey(kv.Key.Key)
 			if err != nil {
 				return 0, err
 			}
-			defer sst.Close()
+			lastKey = lastKey.PrefixEnd()
 		}
 	}
 	if sst.DataSize > 0 {
@@ -556,42 +605,26 @@ func writeRocksDB(
 	return count, nil
 }
 
-// makeBackup writes sst files from contents to destDir and creates a backup
-// descriptor. It returns the number of SST files written.
+// makeBackup writes SST files from contents to es and creates a backup
+// descriptor populated with the written SST files.
 func makeBackup(
-	ctx context.Context,
-	parentID sqlbase.ID,
-	tableDesc *sqlbase.TableDescriptor,
-	destDir string,
-	contentCh <-chan sstContent,
-	walltime int64,
-) (int64, error) {
+	ctx context.Context, contentCh <-chan sstContent, walltime int64, es storageccl.ExportStorage,
+) (*BackupDescriptor, error) {
 	backupDesc := BackupDescriptor{
 		FormatVersion: BackupFormatInitialVersion,
 		EndTime:       hlc.Timestamp{WallTime: walltime},
 	}
-
-	conf, err := storageccl.ExportStorageConfFromURI(destDir)
-	if err != nil {
-		return 0, err
-	}
-	es, err := storageccl.MakeExportStorage(ctx, conf)
-	if err != nil {
-		return 0, err
-	}
-	defer es.Close()
-
 	i := 0
 	for sst := range contentCh {
 		backupDesc.EntryCounts.DataSize += sst.size
 		checksum, err := storageccl.SHA512ChecksumData(sst.data)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		i++
 		name := fmt.Sprintf("%d.sst", i)
 		if err := es.WriteFile(ctx, name, bytes.NewReader(sst.data)); err != nil {
-			return 0, err
+			return nil, err
 		}
 
 		backupDesc.Files = append(backupDesc.Files, BackupDescriptor_File{
@@ -600,9 +633,7 @@ func makeBackup(
 			Sha512: checksum,
 		})
 	}
-
-	err = finalizeCSVBackup(ctx, &backupDesc, parentID, tableDesc, es)
-	return int64(len(backupDesc.Files)), err
+	return &backupDesc, nil
 }
 
 const csvDatabaseName = "csv"
@@ -613,6 +644,7 @@ func finalizeCSVBackup(
 	parentID sqlbase.ID,
 	tableDesc *sqlbase.TableDescriptor,
 	es storageccl.ExportStorage,
+	execCfg *sql.ExecutorConfig,
 ) error {
 	if len(backupDesc.Files) == 0 {
 		return errors.New("no files in backup")
@@ -626,6 +658,12 @@ func finalizeCSVBackup(
 			ID:   parentID,
 		}),
 		*sqlbase.WrapDescriptor(tableDesc),
+	}
+	backupDesc.FormatVersion = BackupFormatInitialVersion
+	backupDesc.BuildInfo = build.GetInfo()
+	if execCfg != nil {
+		backupDesc.NodeID = execCfg.NodeID.Get()
+		backupDesc.ClusterID = execCfg.ClusterID()
 	}
 	descBuf, err := backupDesc.Marshal()
 	if err != nil {
@@ -674,6 +712,14 @@ func importJobDescription(
 	return parser.AsStringWithFlags(&stmt, parser.FmtSimpleQualified), nil
 }
 
+const importCSVEnabledSetting = "experimental.importcsv.enabled"
+
+var importCSVEnabled = settings.RegisterBoolSetting(
+	importCSVEnabledSetting,
+	"enable experimental IMPORT CSV statement",
+	false,
+)
+
 func importPlanHook(
 	stmt parser.Statement, p sql.PlanHookState,
 ) (func(context.Context, chan<- parser.Datums) error, sqlbase.ResultColumns, error) {
@@ -681,7 +727,15 @@ func importPlanHook(
 	if !ok {
 		return nil, nil, nil
 	}
-	// No enterprise check here: IMPORT is always available.
+
+	if !importCSVEnabled.Get(&p.ExecCfg().Settings.SV) {
+		return nil, nil, errors.Errorf(
+			`IMPORT is an experimental feature and is disabled by default; `+
+				`enable by executing: SET CLUSTER SETTING %s = true`,
+			importCSVEnabledSetting,
+		)
+	}
+
 	if err := p.RequireSuperUser("IMPORT"); err != nil {
 		return nil, nil, err
 	}
@@ -837,13 +891,14 @@ func importPlanHook(
 			_, importErr = doDistributedCSVTransform(
 				ctx, job, files, p, tableDesc, temp,
 				comma, comment, nullif, walltime,
+				sstSize,
 			)
 		} else {
 			_, _, _, importErr = doLocalCSVTransform(
 				ctx, job, parentID, tableDesc, temp, files,
 				comma, comment, nullif, sstSize,
 				p.ExecCfg().DistSQLSrv.TempStorage,
-				walltime,
+				walltime, p.ExecCfg(),
 			)
 		}
 		if err := job.FinishedWith(ctx, importErr); err != nil {
@@ -889,6 +944,7 @@ func doDistributedCSVTransform(
 	comma, comment rune,
 	nullif *string,
 	walltime int64,
+	sstSize int64,
 ) (int64, error) {
 	evalCtx := p.EvalContext()
 
@@ -930,13 +986,13 @@ func doDistributedCSVTransform(
 		comma, comment,
 		nullif,
 		walltime,
+		sstSize,
 	); err != nil {
 		return 0, err
 	}
 
 	backupDesc := BackupDescriptor{
-		FormatVersion: BackupFormatInitialVersion,
-		EndTime:       hlc.Timestamp{WallTime: walltime},
+		EndTime: hlc.Timestamp{WallTime: walltime},
 	}
 	n := rows.Len()
 	for i := 0; i < n; i++ {
@@ -967,7 +1023,7 @@ func doDistributedCSVTransform(
 	}
 	defer es.Close()
 
-	if err := finalizeCSVBackup(ctx, &backupDesc, defaultCSVParentID, tableDesc, es); err != nil {
+	if err := finalizeCSVBackup(ctx, &backupDesc, defaultCSVParentID, tableDesc, es, p.ExecCfg()); err != nil {
 		return 0, err
 	}
 	total := int64(len(backupDesc.Files))

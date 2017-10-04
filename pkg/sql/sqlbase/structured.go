@@ -38,6 +38,9 @@ import (
 // ID is a custom type for {Database,Table}Descriptor IDs.
 type ID parser.ID
 
+// InvalidID is the uninitialised descriptor id.
+const InvalidID ID = 0
+
 // IDs is a sortable list of IDs.
 type IDs []ID
 
@@ -82,7 +85,7 @@ const (
 	InterleavedFormatVersion
 )
 
-// MutationID is custom type for TableDescriptor mutations.
+// MutationID is a custom type for TableDescriptor mutations.
 type MutationID uint32
 
 // InvalidMutationID is the uninitialised mutation id.
@@ -607,6 +610,12 @@ func HasCompositeKeyEncoding(semanticType ColumnType_SemanticType) bool {
 		return true
 	}
 	return false
+}
+
+// MustBeValueEncoded returns true if columns of the given kind can only be value
+// encoded.
+func MustBeValueEncoded(semanticType ColumnType_SemanticType) bool {
+	return semanticType == ColumnType_ARRAY
 }
 
 // HasOldStoredColumns returns whether the index has stored columns in the old
@@ -1299,7 +1308,7 @@ func fitColumnToFamily(desc TableDescriptor, col ColumnDescriptor) (int, bool) {
 
 // columnTypeIsIndexable returns whether the type t is valid as an indexed column.
 func columnTypeIsIndexable(t ColumnType) bool {
-	return t.SemanticType != ColumnType_ARRAY
+	return !MustBeValueEncoded(t.SemanticType)
 }
 
 func notIndexableError(cols []ColumnDescriptor) error {

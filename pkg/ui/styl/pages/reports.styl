@@ -180,7 +180,7 @@ $reports-table
     max-width none
 
     &--date
-      min-width 14rem
+      min-width 10rem
 
 .allocator-table
   @extend $reports-table
@@ -317,3 +317,16 @@ $reports-table
 .debug-link
   color $link-color
   text-decoration none
+
+.failure-table
+  @extend $reports-table
+
+  &__row
+    alternating-background white $table-border-color
+
+    &&--header
+      background-color $alert-color
+
+  &__cell
+    white-space normal
+    max-width none

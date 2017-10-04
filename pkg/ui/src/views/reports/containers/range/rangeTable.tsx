@@ -37,6 +37,7 @@ const rangeTableDisplayList: RangeTableRow[] = [
   { variable: "keyRange", display: "Key Range", compareToLeader: true },
   { variable: "problems", display: "Problems", compareToLeader: true },
   { variable: "raftState", display: "Raft State", compareToLeader: false },
+  { variable: "leaseState", display: "Lease State", compareToLeader: true },
   { variable: "leaseHolder", display: "Lease Holder", compareToLeader: true },
   { variable: "leaseType", display: "Lease Type", compareToLeader: true },
   { variable: "leaseEpoch", display: "Lease Epoch", compareToLeader: true },
@@ -74,6 +75,15 @@ const rangeTableDisplayList: RangeTableRow[] = [
 const rangeTableEmptyContent: RangeTableCellContent = {
   value: ["-"],
 };
+
+const rangeTableEmptyContentWithWarning: RangeTableCellContent = {
+  value: ["-"],
+  className: ["range-table__cell--warning"],
+};
+
+function convertLeaseState(leaseState: protos.cockroach.storage.LeaseState) {
+  return protos.cockroach.storage.LeaseState[leaseState].toLowerCase();
+}
 
 export default class RangeTable extends React.Component<RangeTableProps, {}> {
   cleanRaftState(state: string) {
@@ -152,6 +162,7 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
 
   contentProblems(
     problems: protos.cockroach.server.serverpb.RangeProblems$Properties,
+    awaitingGC: boolean,
   ): RangeTableCellContent {
     let results: string[] = [];
     if (problems.no_lease) {
@@ -169,6 +180,9 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
     if (problems.unavailable) {
       results = _.concat(results, "Unavailable");
     }
+    if (awaitingGC) {
+      results = _.concat(results, "Awaiting GC");
+    }
     return {
       value: results,
       title: results,
@@ -184,10 +198,13 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
     leaderCell?: RangeTableCellContent,
   ) {
     const title = _.join(_.isNil(cell.title) ? cell.value : cell.title, "\n");
-    const classNames = _.concat(cell.className, ["range-table__cell"]);
+    const classNames = ["range-table__cell"];
     if (dormant) {
       classNames.push("range-table__cell--dormant");
     } else {
+      if (!_.isNil(cell.className)) {
+        classNames.push(...cell.className);
+      }
       if (!_.isNil(leaderCell) && row.compareToLeader && !_.isEqual(cell.value, leaderCell.value)) {
         classNames.push("range-table__cell--different-from-leader-warning");
       }
@@ -343,21 +360,38 @@ export default class RangeTable extends React.Component<RangeTableProps, {}> {
     const detailsByStoreID: Map<number, RangeTableDetail> = new Map();
     _.forEach(infos, info => {
       const localReplica = RangeInfo.GetLocalReplica(info);
+      const awaitingGC = _.isNil(localReplica);
       const lease = info.state.state.lease;
       const epoch = Lease.IsEpoch(lease);
-      const raftLeader = FixLong(info.raft_state.lead).eq(localReplica.replica_id);
-      const leaseHolder = localReplica.replica_id === lease.replica.replica_id;
+      const raftLeader = !awaitingGC && FixLong(info.raft_state.lead).eq(localReplica.replica_id);
+      const leaseHolder = !awaitingGC && localReplica.replica_id === lease.replica.replica_id;
       const mvcc = info.state.state.stats;
       const raftState = this.contentRaftState(info.raft_state.state);
       const vote = FixLong(info.raft_state.hard_state.vote);
+      let leaseState: RangeTableCellContent;
+      if (_.isNil(info.lease_status)) {
+        leaseState = rangeTableEmptyContentWithWarning;
+      } else {
+        leaseState = this.createContent(
+          convertLeaseState(info.lease_status.state),
+          info.lease_status.state === protos.cockroach.storage.LeaseState.VALID ? "" :
+            "range-table__cell--warning",
+        );
+      }
       if (raftState.value[0] === "dormant") {
         dormantStoreIDs.add(info.source_store_id);
       }
       detailsByStoreID.set(info.source_store_id, {
-        id: this.createContent(Print.ReplicaID(rangeID, RangeInfo.GetLocalReplica(info))),
+        id: this.createContent(Print.ReplicaID(
+          rangeID,
+          localReplica,
+          info.source_node_id,
+          info.source_store_id,
+        )),
         keyRange: this.createContent(`${info.span.start_key} to ${info.span.end_key}`),
-        problems: this.contentProblems(info.problems),
+        problems: this.contentProblems(info.problems, awaitingGC),
         raftState: raftState,
+        leaseState: leaseState,
         leaseHolder: this.createContent(
           Print.ReplicaID(rangeID, lease.replica),
           leaseHolder ? "range-table__cell--lease-holder" : "range-table__cell--lease-follower",

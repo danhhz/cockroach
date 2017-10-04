@@ -750,7 +750,7 @@ func hasLease(repl *Replica, timestamp hlc.Timestamp) (owned bool, expired bool)
 	repl.mu.Lock()
 	defer repl.mu.Unlock()
 	status := repl.leaseStatus(*repl.mu.state.Lease, timestamp, repl.mu.minLeaseProposedTS)
-	return repl.mu.state.Lease.OwnedBy(repl.store.StoreID()), status.state != leaseValid
+	return repl.mu.state.Lease.OwnedBy(repl.store.StoreID()), status.State != LeaseState_VALID
 }
 
 func TestReplicaLease(t *testing.T) {
@@ -1349,7 +1349,7 @@ func TestReplicaNoGossipFromNonLeader(t *testing.T) {
 	// Increment the clock's timestamp to expire the range lease.
 	tc.manualClock.Set(leaseExpiry(tc.repl))
 	lease, _ := tc.repl.getLease()
-	if tc.repl.leaseStatus(lease, tc.Clock().Now(), hlc.Timestamp{}).state != leaseExpired {
+	if tc.repl.leaseStatus(lease, tc.Clock().Now(), hlc.Timestamp{}).State != LeaseState_EXPIRED {
 		t.Fatal("range lease should have been expired")
 	}
 
@@ -3561,6 +3561,87 @@ func TestEndTransactionDeadline(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Test that, when a pushed Snapshot txn would get a "deadline exceeded" error,
+// a Serializable one would get a serializable restart instead. In other words,
+// for Serializable transactions, regular push retriable errors take precedence
+// over the deadline check.
+func TestSerializableDeadline(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	tc := testContext{}
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.TODO())
+	tc.Start(t, stopper)
+
+	const expectedTransactionStatusError int = 1
+	const expectedTransactionRestartError int = 2
+
+	tests := []struct {
+		isoLevel        enginepb.IsolationType
+		expectedErrType int
+		expectedErrMsg  string
+	}{{
+		isoLevel:        enginepb.SNAPSHOT,
+		expectedErrType: expectedTransactionStatusError,
+		expectedErrMsg:  "TransactionStatusError: transaction deadline exceeded",
+	}, {
+		isoLevel:        enginepb.SERIALIZABLE,
+		expectedErrType: expectedTransactionRestartError,
+		expectedErrMsg:  "TransactionRetryError: retry txn \\(RETRY_SERIALIZABLE\\)",
+	}}
+	for i, test := range tests {
+		t.Run(test.isoLevel.String(), func(t *testing.T) {
+			key := roachpb.Key("key: " + strconv.Itoa(i))
+			// Start our txn. It will be pushed next.
+			txn := newTransaction("test txn", key, roachpb.MinUserPriority,
+				test.isoLevel, tc.Clock())
+			beginTxn, header := beginTxnArgs(key, txn)
+			if _, pErr := tc.SendWrappedWith(header, &beginTxn); pErr != nil {
+				t.Fatal(pErr.GoError())
+			}
+
+			tc.manualClock.Increment(100)
+			pusher := newTransaction(
+				"test pusher", key, roachpb.MaxUserPriority,
+				enginepb.SERIALIZABLE, tc.Clock())
+			pushReq := pushTxnArgs(pusher, txn, roachpb.PUSH_TIMESTAMP)
+			pushReq.Now = tc.Clock().Now()
+			resp, pErr := tc.SendWrapped(&pushReq)
+			if pErr != nil {
+				t.Fatal(pErr)
+			}
+			updatedPushee := resp.(*roachpb.PushTxnResponse).PusheeTxn
+			if updatedPushee.Status != roachpb.PENDING {
+				t.Fatalf("expected pushee to still be alive, but got %+v", updatedPushee)
+			}
+
+			// Send an EndTransaction with a deadline below the point where the txn
+			// has been pushed.
+			etArgs, etHeader := endTxnArgs(txn, true /* commit */)
+			deadline := updatedPushee.Timestamp
+			deadline.Logical--
+			etArgs.Deadline = &deadline
+			_, pErr = tc.SendWrappedWith(etHeader, &etArgs)
+			if pErr == nil {
+				t.Fatalf("expected %q, got: nil", test.expectedErrMsg)
+			}
+			err := pErr.GoError()
+			if test.expectedErrType == expectedTransactionStatusError {
+				if _, ok := err.(*roachpb.TransactionStatusError); !ok ||
+					!testutils.IsError(err, test.expectedErrMsg) {
+					t.Fatalf("expected %q, got: %s (%T)", test.expectedErrMsg,
+						err, err)
+				}
+			} else {
+				if _, ok := pErr.GetDetail().(*roachpb.TransactionRetryError); !ok ||
+					!testutils.IsError(err, test.expectedErrMsg) {
+					t.Fatalf("expected %q, got: %s (%T)", test.expectedErrMsg,
+						err, pErr.GetDetail())
+				}
+			}
+		})
 	}
 }
 
@@ -6644,11 +6725,11 @@ func TestQuotaPoolAccessOnDestroyedReplica(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := repl.handleRaftReady(IncomingSnapshot{}); err != nil {
+	if _, _, err := repl.handleRaftReady(IncomingSnapshot{}); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := repl.handleRaftReady(IncomingSnapshot{}); err != nil {
+	if _, _, err := repl.handleRaftReady(IncomingSnapshot{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -7597,7 +7678,7 @@ func TestReplicaBurstPendingCommandsAndRepropose(t *testing.T) {
 
 			tc.repl.raftMu.Lock()
 			tc.repl.mu.Lock()
-			tc.repl.insertProposalLocked(cmd, repDesc, status.lease)
+			tc.repl.insertProposalLocked(cmd, repDesc, status.Lease)
 			chs = append(chs, cmd.doneCh)
 			tc.repl.mu.Unlock()
 			tc.repl.raftMu.Unlock()

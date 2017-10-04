@@ -28,6 +28,7 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -86,7 +87,8 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	if !validExpirationTime(lease.ExpirationTime) {
-		t.Fatalf("invalid expiration time: %s", time.Unix(0, lease.ExpirationTime))
+		t.Fatalf("invalid expiration time: %s. now: %s",
+			timeutil.Unix(0, lease.ExpirationTime), timeutil.Now())
 	}
 
 	// Acquiring another lease will fail.
@@ -103,7 +105,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	if !validExpirationTime(lease.ExpirationTime) {
-		t.Fatalf("invalid expiration time: %s", time.Unix(0, lease.ExpirationTime))
+		t.Fatalf("invalid expiration time: %s", timeutil.Unix(0, lease.ExpirationTime))
 	}
 
 	// The new lease is a brand new lease.
@@ -151,7 +153,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 
 func validExpirationTime(expirationTime int64) bool {
 	now := timeutil.Now()
-	return expirationTime > now.Add(sql.LeaseDuration/2).UnixNano() && expirationTime < now.Add(sql.LeaseDuration*3/2).UnixNano()
+	return expirationTime > now.Add(sql.SchemaChangeLeaseDuration/2).UnixNano() && expirationTime < now.Add(sql.SchemaChangeLeaseDuration*3/2).UnixNano()
 }
 
 func TestSchemaChangeProcess(t *testing.T) {
@@ -2404,6 +2406,20 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL DEFAULT (DECIMAL '3.14
 
 	tableDesc := sqlbase.GetTableDescriptor(kvDB, "t", "test")
 
+	// Add a zone config.
+	cfg := config.DefaultZoneConfig()
+	buf, err := protoutil.Marshal(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO system.zones VALUES ($1, $2)`, tableDesc.ID, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := zoneExists(sqlDB, true, tableDesc.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := sqlDB.Exec("TRUNCATE TABLE t.test"); err != nil {
 		t.Error(err)
 	}
@@ -2416,6 +2432,9 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL DEFAULT (DECIMAL '3.14
 	newTableDesc := sqlbase.GetTableDescriptor(kvDB, "t", "test")
 	if !newTableDesc.Adding() {
 		t.Fatalf("bad state = %s", newTableDesc.State)
+	}
+	if err := zoneExists(sqlDB, true, newTableDesc.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	// Ensure that the table data hasn't been deleted.
@@ -2482,6 +2501,20 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL REFERENCES t.pi (d) DE
 
 	tableDesc := sqlbase.GetTableDescriptor(kvDB, "t", "test")
 
+	// Add a zone config.
+	cfg := config.DefaultZoneConfig()
+	buf, err := protoutil.Marshal(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO system.zones VALUES ($1, $2)`, tableDesc.ID, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := zoneExists(sqlDB, true, tableDesc.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := sqlDB.Exec("TRUNCATE TABLE t.test"); err != nil {
 		t.Error(err)
 	}
@@ -2511,6 +2544,9 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL REFERENCES t.pi (d) DE
 	if newTableDesc.Adding() {
 		t.Fatalf("bad state = %s", newTableDesc.State)
 	}
+	if err := zoneExists(sqlDB, true, newTableDesc.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	// Wait until the older descriptor has been deleted.
 	testutils.SucceedsSoon(t, func() error {
@@ -2526,6 +2562,10 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL REFERENCES t.pi (d) DE
 		}
 		return errors.Errorf("table descriptor exists after table is truncated: %d", tableDesc.ID)
 	})
+
+	if err := zoneExists(sqlDB, false, tableDesc.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	// Ensure that the table data has been deleted.
 	tablePrefix := roachpb.Key(keys.MakeTablePrefix(uint32(tableDesc.ID)))
@@ -2543,5 +2583,104 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL REFERENCES t.pi (d) DE
 		t.Fatal(err)
 	} else if e := 1; len(kvs) != e {
 		t.Fatalf("expected %d key value pairs, but got %d", e, len(kvs))
+	}
+}
+
+// Test TRUNCATE during a column backfill.
+func TestTruncateWhileColumnBackfill(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	backfillNotification := make(chan struct{})
+	backfillCount := int64(0)
+	params, _ := createTestServerParams()
+	params.Knobs = base.TestingKnobs{
+		// Runs schema changes asynchronously.
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			SyncFilter: func(tscc sql.TestingSchemaChangerCollection) {
+				tscc.ClearSchemaChangers()
+			},
+			AsyncExecQuickly: true,
+		},
+		DistSQL: &distsqlrun.TestingKnobs{
+			RunBeforeBackfillChunk: func(sp roachpb.Span) error {
+				switch atomic.LoadInt64(&backfillCount) {
+				case 3:
+					// Notify in the middle of a backfill.
+					if backfillNotification != nil {
+						close(backfillNotification)
+						backfillNotification = nil
+					}
+					// Never complete the backfill.
+					return context.DeadlineExceeded
+				default:
+					atomic.AddInt64(&backfillCount, 1)
+				}
+				return nil
+			},
+		},
+	}
+	s, sqlDB, kvDB := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.TODO())
+
+	if _, err := sqlDB.Exec(`
+CREATE DATABASE t;
+CREATE TABLE t.test (k INT PRIMARY KEY, v INT);
+`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bulk insert.
+	const maxValue = 5000
+	if err := bulkInsertIntoTable(sqlDB, maxValue); err != nil {
+		t.Fatal(err)
+	}
+
+	notify := backfillNotification
+
+	if _, err := sqlDB.Exec("ALTER TABLE t.test ADD COLUMN x DECIMAL NOT NULL DEFAULT (DECIMAL '1.4')"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := sqlDB.Exec("ALTER TABLE t.test DROP COLUMN v"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that an outstanding schema change exists.
+	tableDesc := sqlbase.GetTableDescriptor(kvDB, "t", "test")
+	if lenMutations := len(tableDesc.Mutations); lenMutations != 2 {
+		t.Fatalf("%d outstanding schema change", lenMutations)
+	}
+
+	// Run TRUNCATE.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		<-notify
+		if _, err := sqlDB.Exec("TRUNCATE TABLE t.test"); err != nil {
+			t.Error(err)
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+
+	// The new table is truncated.
+	tableDesc = sqlbase.GetTableDescriptor(kvDB, "t", "test")
+	tablePrefix := roachpb.Key(keys.MakeTablePrefix(uint32(tableDesc.ID)))
+	tableEnd := tablePrefix.PrefixEnd()
+	if kvs, err := kvDB.Scan(context.TODO(), tablePrefix, tableEnd, 0); err != nil {
+		t.Fatal(err)
+	} else if e := 0; len(kvs) != e {
+		t.Fatalf("expected %d key value pairs, but got %d", e, len(kvs))
+	}
+
+	// Col "x" is public and col "v" is dropped.
+	if num := len(tableDesc.Mutations); num > 0 {
+		t.Fatalf("%d outstanding mutation", num)
+	}
+	if lenCols := len(tableDesc.Columns); lenCols != 2 {
+		t.Fatalf("%d columns", lenCols)
+	}
+	if k, x := tableDesc.Columns[0].Name, tableDesc.Columns[1].Name; k != "k" && x != "x" {
+		t.Fatalf("columns %q, %q in descriptor", k, x)
 	}
 }

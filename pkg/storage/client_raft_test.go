@@ -1115,14 +1115,24 @@ func TestStoreRangeUpReplicate(t *testing.T) {
 	mtc.stores[0].ForceReplicationScanAndProcess()
 
 	// The range should become available on every node.
+	var r *storage.Replica // from the last store
 	testutils.SucceedsSoon(t, func() error {
+		rs := roachpb.RSpan{
+			Key: roachpb.RKey("a"), EndKey: roachpb.RKey("z"),
+		}
 		for _, s := range mtc.stores {
-			r := s.LookupReplica(roachpb.RKey("a"), roachpb.RKey("b"))
+			r = s.LookupReplica(rs.Key, rs.EndKey)
 			if r == nil {
-				return errors.Errorf("expected replica for keys \"a\" - \"b\"")
+				return errors.Errorf("expected replica for span %v", rs)
 			}
 			if n := s.ReservationCount(); n != 0 {
 				return errors.Errorf("expected 0 reservations, but found %d", n)
+			}
+			if len(r.Desc().Replicas) != 3 {
+				// This fails even after the preemptive snapshot has arrived and
+				// only goes through once the replica has properly caught up to
+				// the fully replicated descriptor.
+				return errors.Errorf("not fully initialized")
 			}
 		}
 		return nil
@@ -1146,6 +1156,23 @@ func TestStoreRangeUpReplicate(t *testing.T) {
 	}
 	if generated != preemptiveApplied {
 		t.Fatalf("expected %d preemptive snapshots, but found %d", generated, preemptiveApplied)
+	}
+
+	r.PutBogusSideloadedData()
+
+	againR, _, err := mtc.stores[2].GetOrCreateReplica(
+		context.Background(),
+		r.RangeID,
+		0,   // replicaID
+		nil, // fromReplica
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	againR.RaftUnlock()
+
+	if !againR.HasBogusSideloadedData() {
+		t.Fatalf("sideloaded storage changed after fake message to replicaID zero")
 	}
 }
 
@@ -2438,11 +2465,17 @@ func TestReplicaGCRace(t *testing.T) {
 	errChan := errorChannelTestHandler(make(chan *roachpb.Error, 1))
 	fromTransport.Listen(fromStore.StoreID(), errChan)
 
-	// Send the heartbeat. Boom. See
-	// https://github.com/cockroachdb/cockroach/issues/11591.
-	fromTransport.SendAsync(&hbReq)
+	// Send the heartbeat. Boom. See #11591.
+	// We have to send this multiple times to protect against
+	// dropped messages (see #18355).
+	if sent := fromTransport.SendAsync(&hbReq); !sent {
+		t.Fatal("failed to send heartbeat")
+	}
+	heartbeatsSent := 1
 
-	// The receiver of this message should return an error.
+	// The receiver of this message should return an error. If we don't get a
+	// quick response, assume that the message got dropped and try sending it
+	// again.
 	select {
 	case pErr := <-errChan:
 		switch pErr.GetDetail().(type) {
@@ -2451,7 +2484,13 @@ func TestReplicaGCRace(t *testing.T) {
 			t.Fatalf("unexpected error type %T: %s", pErr.GetDetail(), pErr)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("did not get expected error")
+		if heartbeatsSent >= 5 {
+			t.Fatal("did not get expected error")
+		}
+		heartbeatsSent++
+		if sent := fromTransport.SendAsync(&hbReq); !sent {
+			t.Fatal("failed to send heartbeat")
+		}
 	}
 }
 

@@ -36,6 +36,11 @@ import (
 // concurrent use by multiple goroutines.
 type Txn struct {
 	db *DB
+	// gatewayNodeID, if != 0, is the ID of the node on whose behalf this
+	// transaction is running. Normally this is the current node, but in the case
+	// of Txns created on remote nodes by DistSQL this will be the gateway.
+	// It will be attached to all requests sent through this transaction.
+	gatewayNodeID roachpb.NodeID
 
 	// The following fields are not safe for concurrent modification.
 	// They should be set before operating on the transaction.
@@ -98,8 +103,15 @@ type Txn struct {
 }
 
 // NewTxn returns a new txn.
-func NewTxn(db *DB) *Txn {
-	return NewTxnWithProto(db, roachpb.MakeTransaction(
+//
+// gatewayNodeID: If != 0, this is the ID of the node on whose behalf this
+//   transaction is running. Normally this is the current node, but in the case
+//   of Txns created on remote nodes by DistSQL this will be the gateway.
+//   If 0 is passed, then no value is going to be filled in the batches sent
+//   through this txn. This will have the effect that the DistSender will fill
+//   in the batch with the current node's ID.
+func NewTxn(db *DB, gatewayNodeID roachpb.NodeID) *Txn {
+	return NewTxnWithProto(db, gatewayNodeID, roachpb.MakeTransaction(
 		"unnamed",
 		nil, // baseKey
 		roachpb.NormalUserPriority,
@@ -109,14 +121,15 @@ func NewTxn(db *DB) *Txn {
 	))
 }
 
-// NewTxnWithProto returns a new txn with the provided Transaction proto.
-// This allows a client.Txn to be created with an already initialized proto.
-func NewTxnWithProto(db *DB, proto roachpb.Transaction) *Txn {
+// NewTxnWithProto is like NewTxn, except it returns a new txn with the provided
+// Transaction proto. This allows a client.Txn to be created with an already
+// initialized proto.
+func NewTxnWithProto(db *DB, gatewayNodeID roachpb.NodeID, proto roachpb.Transaction) *Txn {
 	if db == nil {
 		log.Fatalf(context.TODO(), "attempting to create txn with nil db for Transaction: %s", proto)
 	}
 	proto.AssertInitialized(context.TODO())
-	txn := &Txn{db: db}
+	txn := &Txn{db: db, gatewayNodeID: gatewayNodeID}
 	txn.mu.Proto = proto
 	return txn
 }
@@ -154,10 +167,21 @@ func (txn *Txn) IsFinalized() bool {
 	return txn.mu.finalized
 }
 
+// status returns the txn proto status field.
 func (txn *Txn) status() roachpb.TransactionStatus {
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
 	return txn.mu.Proto.Status
+}
+
+// IsCommitted returns true if the transaction has the committed status.
+func (txn *Txn) IsCommitted() bool {
+	return txn.status() == roachpb.COMMITTED
+}
+
+// IsAborted returns true if the transaction has the aborted status.
+func (txn *Txn) IsAborted() bool {
+	return txn.status() == roachpb.ABORTED
 }
 
 // SetUserPriority sets the transaction's user priority. Transactions default to
@@ -567,8 +591,15 @@ func (txn *Txn) CommitOrCleanup(ctx context.Context) error {
 
 // UpdateDeadlineMaybe sets the transactions deadline to the lower of the
 // current one (if any) and the passed value.
-func (txn *Txn) UpdateDeadlineMaybe(deadline hlc.Timestamp) bool {
+//
+// The deadline cannot be lower than txn.OrigTimestamp.
+func (txn *Txn) UpdateDeadlineMaybe(ctx context.Context, deadline hlc.Timestamp) bool {
 	if txn.deadline == nil || deadline.Less(*txn.deadline) {
+		if deadline.Less(txn.OrigTimestamp()) {
+			log.Fatalf(ctx, "deadline below txn.OrigTimestamp is nonsensical; "+
+				"txn has would have no change to commit. Deadline: %s, txn: %s",
+				deadline, txn.Proto())
+		}
 		txn.deadline = &deadline
 		return true
 	}
@@ -709,6 +740,14 @@ func (e *AutoCommitError) Error() string {
 // to clean up the transaction before returning an error. In case of
 // TransactionAbortedError, txn is reset to a fresh transaction, ready to be
 // used.
+//
+// TODO(andrei): The SQL Executor was the most complex user of this interface.
+// It needed fine control by using TxnExecOptions. Now SQL no longer uses this
+// interface, so it's time to see how it can be simplified. TxnExecOptions can
+// probably go away, and so can AutoCommitError. The method should also be
+// documented to not allow calls concurrent with any other txn use, so that the
+// Commit() call inside it is clearly correct (as in, it won't run concurrently
+// with other txn calls).
 func (txn *Txn) Exec(
 	ctx context.Context, opt TxnExecOptions, fn func(context.Context, *Txn, *TxnExecOptions) error,
 ) (err error) {
@@ -722,11 +761,7 @@ func (txn *Txn) Exec(
 		err = fn(ctx, txn, &opt)
 
 		if err == nil && opt.AutoCommit {
-			// Copy the status out of the Proto under lock. Making decisions on
-			// this later is not thread-safe, but the commutativity property of
-			// transactions assure that reasoning about the situation is straightforward.
 			status := txn.status()
-
 			switch status {
 			case roachpb.ABORTED:
 				// TODO(andrei): Until 7881 is fixed.
@@ -766,13 +801,20 @@ func (txn *Txn) Exec(
 			break
 		}
 
-		txn.commitTriggers = nil
-
-		log.VEventf(ctx, 2, "automatically retrying transaction: %s because of error: %s",
-			txn.DebugName(), err)
+		txn.PrepareForRetry(ctx, err)
 	}
 
 	return err
+}
+
+// PrepareForRetry needs to be called before an retry to perform some
+// book-keeping.
+//
+// TODO(andrei): I think this is called in the wrong place. See #18170.
+func (txn *Txn) PrepareForRetry(ctx context.Context, err error) {
+	txn.commitTriggers = nil
+	log.VEventf(ctx, 2, "automatically retrying transaction: %s because of error: %s",
+		txn.DebugName(), err)
 }
 
 // IsRetryableErrMeantForTxn returns true if err is a retryable
@@ -810,6 +852,15 @@ func (txn *Txn) Send(
 	if ba.ReadConsistency != roachpb.CONSISTENT {
 		return nil, roachpb.NewErrorf("cannot use %s ReadConsistency in txn",
 			ba.ReadConsistency)
+	}
+
+	// Fill in the GatewayNodeID on the batch if the txn knows it.
+	// NOTE(andrei): It seems a bit ugly that we're filling in the batches here as
+	// opposed to the point where the requests are being created, but
+	// unfortunately requests are being created in many ways and this was the best
+	// place I found to set this field.
+	if txn.gatewayNodeID != 0 {
+		ba.Header.GatewayNodeID = txn.gatewayNodeID
 	}
 
 	lastIndex := len(ba.Requests) - 1
@@ -1141,7 +1192,7 @@ func (txn *Txn) recordPreviousTxnIDLocked(prevTxnID uuid.UUID) {
 // This is used to support historical queries (AS OF SYSTEM TIME queries and
 // backups). This method must be called on every transaction retry (but note
 // that retries should be rare for read-only queries with no clock uncertainty).
-func (txn *Txn) SetFixedTimestamp(ts hlc.Timestamp) {
+func (txn *Txn) SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp) {
 	txn.mu.Lock()
 	txn.mu.Proto.Timestamp = ts
 	txn.mu.Proto.OrigTimestamp = ts
@@ -1152,7 +1203,7 @@ func (txn *Txn) SetFixedTimestamp(ts hlc.Timestamp) {
 	// it won't ever exceed the deadline, and thus setting the deadline here is
 	// not strictly needed. However, it doesn't do anything incorrect and it will
 	// possibly find problems if things change in the future, so it is left in.
-	txn.UpdateDeadlineMaybe(ts)
+	txn.UpdateDeadlineMaybe(ctx, ts)
 }
 
 // GenerateForcedRetryableError returns a HandledRetryableTxnError that will

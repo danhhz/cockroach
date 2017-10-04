@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const crdbInternalName = "crdb_internal"
@@ -193,25 +194,29 @@ CREATE TABLE crdb_internal.tables (
 			if !ok || !userCanSeeDescriptor(table, p.session.User) {
 				continue
 			}
-			dbName := dbNames[table.ParentID]
+			dbName := dbNames[table.GetParentID()]
 			if dbName == "" {
-				return errors.Errorf("could not find database %d", table.ParentID)
+				// The parent database was deleted. This is possible e.g. when
+				// a database is dropped with CASCADE, and someone queries
+				// this virtual table before the dropped table descriptors are
+				// effectively deleted.
+				dbName = fmt.Sprintf("[%d]", table.GetParentID())
 			}
 			leaseNodeDatum := parser.DNull
 			leaseExpDatum := parser.DNull
 			if table.Lease != nil {
 				leaseNodeDatum = parser.NewDInt(parser.DInt(int64(table.Lease.NodeID)))
 				leaseExpDatum = parser.MakeDTimestamp(
-					time.Unix(0, table.Lease.ExpirationTime), time.Nanosecond,
+					timeutil.Unix(0, table.Lease.ExpirationTime), time.Nanosecond,
 				)
 			}
 			if err := addRow(
 				parser.NewDInt(parser.DInt(int64(table.ID))),
-				parser.NewDInt(parser.DInt(int64(table.ParentID))),
+				parser.NewDInt(parser.DInt(int64(table.GetParentID()))),
 				parser.NewDString(table.Name),
 				parser.NewDString(dbName),
 				parser.NewDInt(parser.DInt(int64(table.Version))),
-				parser.MakeDTimestamp(time.Unix(0, table.ModificationTime.WallTime), time.Microsecond),
+				parser.MakeDTimestamp(timeutil.Unix(0, table.ModificationTime.WallTime), time.Microsecond),
 				parser.TimestampToDecimal(table.ModificationTime),
 				parser.NewDString(table.FormatVersion.String()),
 				parser.NewDString(table.State.String()),
@@ -251,7 +256,7 @@ CREATE TABLE crdb_internal.schema_changes (
 				continue
 			}
 			tableID := parser.NewDInt(parser.DInt(int64(table.ID)))
-			parentID := parser.NewDInt(parser.DInt(int64(table.ParentID)))
+			parentID := parser.NewDInt(parser.DInt(int64(table.GetParentID())))
 			tableName := parser.NewDString(table.Name)
 			for _, mut := range table.Mutations {
 				mutType := "UNKNOWN"
@@ -325,7 +330,7 @@ CREATE TABLE crdb_internal.leases (
 						nodeID,
 						tableID,
 						parser.NewDString(state.Name),
-						parser.NewDInt(parser.DInt(int64(state.ParentID))),
+						parser.NewDInt(parser.DInt(int64(state.GetParentID()))),
 						&expCopy,
 						dropped,
 					); err != nil {
@@ -377,7 +382,7 @@ CREATE TABLE crdb_internal.jobs (
 				if micros == 0 {
 					return parser.DNull
 				}
-				ts := time.Unix(0, micros*time.Microsecond.Nanoseconds())
+				ts := timeutil.Unix(0, micros*time.Microsecond.Nanoseconds())
 				return parser.MakeDTimestamp(ts, time.Microsecond)
 			}
 			descriptorIDs := parser.NewDArray(parser.TypeInt)
@@ -807,6 +812,7 @@ func populateSessionsTable(
 			// Add a row with this node ID, and nulls for all other columns
 			if err := addRow(
 				parser.NewDInt(parser.DInt(rpcErr.NodeID)),
+				parser.DNull,
 				parser.DNull,
 				parser.DNull,
 				parser.DNull,
