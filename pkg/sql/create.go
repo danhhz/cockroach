@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/net/context"
@@ -1162,10 +1163,33 @@ func addPartitionedBy(
 				Name:   partition.Name,
 				Values: values,
 			})
+		case parser.PartitionByRange:
+			// TODO(dan): This check should be in TableDescriptor.Validate
+			if len(values) != 1 {
+				return errors.Errorf("range partitions expect exactly one row got: %v", rows)
+			}
+			indexDesc.Partitioning.Range = append(indexDesc.Partitioning.Range, sqlbase.PartitioningDescriptor_Range{
+				Name:           partition.Name,
+				ValuesLessThan: values[0],
+			})
 		default:
 			return errors.Errorf("unsupported PARTITION BY: %s", part.Typ)
 		}
 	}
+
+	// TODO(dan): This check should be in TableDescriptor.Validate
+	if len(indexDesc.Partitioning.List) > 0 && len(indexDesc.Partitioning.Range) > 0 {
+		return errors.Errorf("only one of list or range partitioning may be used")
+	}
+
+	// TODO(dan): I think instead we should make the user sort it and fail if
+	// it's not. What does MySQL do?
+	sort.Slice(indexDesc.Partitioning.Range, func(i, j int) bool {
+		return bytes.Compare(
+			indexDesc.Partitioning.Range[i].ValuesLessThan,
+			indexDesc.Partitioning.Range[j].ValuesLessThan,
+		) < 0
+	})
 
 	return nil
 }

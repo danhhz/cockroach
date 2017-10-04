@@ -2121,12 +2121,41 @@ func (desc *TableDescriptor) IndexSpansByPartition(
 	if list := index.Partitioning.List; list != nil {
 		datums := make(parser.Datums, n)
 		for _, p := range list {
-			for i, v := range p.Values {
-				d, _, err := DecodeTableValue(&da, colTypes[i], v)
+			for _, buf := range p.Values {
+				for i := 0; i < n; i++ {
+					var err error
+					datums[i], buf, err = DecodeTableValue(&da, colTypes[i], buf)
+					if err != nil {
+						return nil, err
+					}
+				}
+				key, _, err := EncodePartialIndexKey(
+					desc,
+					index,
+					n,
+					colMap,
+					datums,
+					indexKeyPrefix,
+				)
 				if err != nil {
 					return nil, err
 				}
-				datums[i] = d
+				out[p.Name] = append(out[p.Name], roachpb.Span{
+					Key: key, EndKey: roachpb.Key(key).PrefixEnd(),
+				})
+			}
+		}
+	} else if ranges := index.Partitioning.Range; ranges != nil {
+		previousKey := indexKeyPrefix
+		datums := make(parser.Datums, n)
+		for _, p := range ranges {
+			buf := p.ValuesLessThan
+			for i := 0; i < n; i++ {
+				var err error
+				datums[i], buf, err = DecodeTableValue(&da, colTypes[i], buf)
+				if err != nil {
+					return nil, err
+				}
 			}
 			key, _, err := EncodePartialIndexKey(
 				desc,
@@ -2140,12 +2169,10 @@ func (desc *TableDescriptor) IndexSpansByPartition(
 				return nil, err
 			}
 			out[p.Name] = append(out[p.Name], roachpb.Span{
-				Key: key, EndKey: roachpb.Key(key).PrefixEnd(),
+				Key: previousKey, EndKey: key,
 			})
+			previousKey = key
 		}
-	} else if ranges := index.Partitioning.Range; ranges != nil {
-		// TODO(benesch)
-		panic("unimplemented")
 	}
 	return out, nil
 }

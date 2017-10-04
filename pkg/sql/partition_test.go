@@ -72,9 +72,9 @@ func setZoneConfig(sqlDB *gosql.DB, names []string, cfg *config.ZoneConfig) erro
 			return err
 		}
 
-		// TODO(dan): Don't hardcode table 51. Heh
+		// TODO(dan): So hacky
 		var descBytes []byte
-		if err := sqlDB.QueryRow(`SELECT descriptor FROM system.descriptor WHERE id = 51`).Scan(&descBytes); err != nil {
+		if err := sqlDB.QueryRow(`SELECT d.descriptor FROM system.descriptor d JOIN system.namespace n ON d.id = n.id WHERE n.name = $1`, names[1]).Scan(&descBytes); err != nil {
 			return err
 		}
 		var desc sqlbase.Descriptor
@@ -150,54 +150,29 @@ func TestPartitioning(t *testing.T) {
 	}}
 	tc := testcluster.StartTestCluster(t, 3, tcArgs)
 	defer tc.Stopper().Stop(ctx)
-	sqlDB := sqlutils.MakeSQLRunner(t, tc.Conns[0])
-
-	sqlDB.Exec(`CREATE DATABASE data`)
-	sqlDB.Exec(`CREATE TABLE data.foo (
-		a INT, b INT, PRIMARY KEY (a, b)
-	) PARTITION BY LIST (a) (
-		PARTITION dc1 (VALUES (10)),
-		PARTITION dc2 (VALUES (20))
-	)`)
-
-	{
-		cfg := config.DefaultZoneConfig()
-		if err := setZoneConfig(sqlDB.DB, []string{"data", "foo"}, &cfg); err != nil {
-			t.Fatalf("%+v", err)
-		}
-	}
-
-	{
-		cfg := config.DefaultZoneConfig()
-		cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
-			Type: config.Constraint_REQUIRED, Value: "dc1",
-		}}}
-		if err := setZoneConfig(sqlDB.DB, []string{"data", "foo", "dc1"}, &cfg); err != nil {
-			t.Fatalf("%+v", err)
-		}
-	}
-
-	{
-		cfg := config.DefaultZoneConfig()
-		cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
-			Type: config.Constraint_REQUIRED, Value: "dc2",
-		}}}
-		if err := setZoneConfig(sqlDB.DB, []string{"data", "foo", "dc2"}, &cfg); err != nil {
-			t.Fatalf("%+v", err)
-		}
-	}
 
 	verifyScansOnNode := func(query string, node string) error {
-		traceLines := sqlDB.QueryStr(
+		rows, err := tc.Conns[0].Query(
 			fmt.Sprintf(`SELECT context, message FROM [SHOW TRACE FOR %s]`, query),
 		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 		var scansWrongNode []string
-		for _, traceLine := range traceLines {
-			if !strings.Contains(traceLine[1], "Scan") || strings.Contains(traceLine[1], "sending batch") {
+		var traceLines []string
+		var context, message gosql.NullString
+		for rows.Next() {
+			if err := rows.Scan(&context, &message); err != nil {
+				return err
+			}
+			traceLine := fmt.Sprintf("%s %s", context.String, message.String)
+			traceLines = append(traceLines, traceLine)
+			if !strings.Contains(message.String, "Scan") || strings.Contains(message.String, "sending batch") {
 				continue
 			}
-			if !strings.Contains(traceLine[0], node) {
-				scansWrongNode = append(scansWrongNode, strings.Join(traceLine, " "))
+			if !strings.Contains(context.String, node) {
+				scansWrongNode = append(scansWrongNode, traceLine)
 			}
 		}
 		if len(scansWrongNode) > 0 {
@@ -205,30 +180,117 @@ func TestPartitioning(t *testing.T) {
 			fmt.Fprintf(&err, "expected scans on %s:\n%s\nfull trace:", node, strings.Join(scansWrongNode, "\n"))
 			for _, traceLine := range traceLines {
 				err.WriteString("\n  ")
-				err.WriteString(strings.Join(traceLine, " "))
+				err.WriteString(traceLine)
 			}
 			return errors.New(err.String())
 		}
 		return nil
 	}
 
-	testutils.SucceedsSoon(t, func() error {
-		dc1Err := verifyScansOnNode(`SELECT * FROM data.foo WHERE a = 10`, `n2`)
-		dc2Err := verifyScansOnNode(`SELECT * FROM data.foo WHERE a = 20`, `n3`)
+	t.Run("List", func(t *testing.T) {
+		sqlDB := sqlutils.MakeSQLRunner(t, tc.Conns[0])
+		sqlDB.Exec(`CREATE DATABASE IF NOT EXISTS data`)
+		sqlDB.Exec(`CREATE TABLE data.list (
+			a INT, b INT, PRIMARY KEY (a, b)
+		) PARTITION BY LIST (a) (
+			PARTITION dc1 (VALUES (10)),
+			PARTITION dc2 (VALUES (20))
+		)`)
 
-		if dc1Err != nil {
-			log.Info(ctx, dc1Err)
-		}
-		if dc2Err != nil {
-			log.Info(ctx, dc2Err)
+		{
+			cfg := config.DefaultZoneConfig()
+			cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
+				Type: config.Constraint_REQUIRED, Value: "dc1",
+			}}}
+			if err := setZoneConfig(sqlDB.DB, []string{"data", "list", "dc1"}, &cfg); err != nil {
+				t.Fatalf("%+v", err)
+			}
 		}
 
-		if dc1Err != nil {
-			return dc1Err
+		{
+			cfg := config.DefaultZoneConfig()
+			cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
+				Type: config.Constraint_REQUIRED, Value: "dc2",
+			}}}
+			if err := setZoneConfig(sqlDB.DB, []string{"data", "list", "dc2"}, &cfg); err != nil {
+				t.Fatalf("%+v", err)
+			}
 		}
-		if dc2Err != nil {
-			return dc2Err
+
+		testutils.SucceedsSoon(t, func() error {
+			dc1Err := verifyScansOnNode(`SELECT * FROM data.list WHERE a = 10`, `n2`)
+			dc2Err := verifyScansOnNode(`SELECT * FROM data.list WHERE a = 20`, `n3`)
+
+			if dc1Err != nil {
+				log.Info(ctx, dc1Err)
+			}
+			if dc2Err != nil {
+				log.Info(ctx, dc2Err)
+			}
+
+			if dc1Err != nil {
+				return dc1Err
+			}
+			if dc2Err != nil {
+				return dc2Err
+			}
+			return nil
+		})
+	})
+
+	t.Run("Range", func(t *testing.T) {
+		sqlDB := sqlutils.MakeSQLRunner(t, tc.Conns[0])
+		sqlDB.Exec(`CREATE DATABASE IF NOT EXISTS data`)
+		sqlDB.Exec(`CREATE TABLE data.range (
+			a INT, b INT, PRIMARY KEY (a, b)
+		) PARTITION BY RANGE (a) (
+			PARTITION dc1 VALUES LESS THAN (VALUES (4)),
+			PARTITION dc2 VALUES LESS THAN (VALUES (8))
+		)`)
+
+		{
+			cfg := config.DefaultZoneConfig()
+			cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
+				Type: config.Constraint_REQUIRED, Value: "dc1",
+			}}}
+			if err := setZoneConfig(sqlDB.DB, []string{"data", "range", "dc1"}, &cfg); err != nil {
+				t.Fatalf("%+v", err)
+			}
 		}
-		return nil
+
+		{
+			cfg := config.DefaultZoneConfig()
+			cfg.Constraints = config.Constraints{Constraints: []config.Constraint{{
+				Type: config.Constraint_REQUIRED, Value: "dc2",
+			}}}
+			if err := setZoneConfig(sqlDB.DB, []string{"data", "range", "dc2"}, &cfg); err != nil {
+				t.Fatalf("%+v", err)
+			}
+		}
+
+		testutils.SucceedsSoon(t, func() error {
+			rs := sqlDB.QueryStr(`SHOW TESTING_RANGES FROM TABLE data.range`)
+			for _, r := range rs {
+				log.Infof(ctx, "range %s", r)
+			}
+
+			dc1Err := verifyScansOnNode(`SELECT * FROM data.range WHERE a = 3`, `n2`)
+			dc2Err := verifyScansOnNode(`SELECT * FROM data.range WHERE a = 7`, `n3`)
+
+			if dc1Err != nil {
+				log.Info(ctx, dc1Err)
+			}
+			if dc2Err != nil {
+				log.Info(ctx, dc2Err)
+			}
+
+			if dc1Err != nil {
+				return dc1Err
+			}
+			if dc2Err != nil {
+				return dc2Err
+			}
+			return nil
+		})
 	})
 }
