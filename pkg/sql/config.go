@@ -37,13 +37,9 @@ func GetZoneConfig(
 		if err != nil {
 			return config.ZoneConfig{}, false, err
 		}
-		zone2, ok := zone.MaybeGetPartition(keySuffix)
-		if id == 51 {
-			// log.Infof(context.TODO(), "GetZoneConfigHook %v %s -> %v", ok, roachpb.Key(append(keys.MakeTablePrefix(id), keySuffix...)), zone2.Constraints)
-		}
-		if ok {
+		if zone, ok := zone.MaybeGetPartition(keySuffix); ok {
 			// Either a partition or the table matched. We're done.
-			return zone2, true, nil
+			return zone, true, nil
 		}
 		// This ZoneConfig contains partition ZoneConfigs (none of which
 		// matched) and no table-level ZoneConfig. Fall back to database, etc.

@@ -139,19 +139,17 @@ func allRangeDescriptors(ctx context.Context, db *client.DB) ([]roachpb.RangeDes
 func TestPartitioning(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
+	cfg := config.DefaultZoneConfig()
+	cfg.NumReplicas = 1
+	defer config.TestingSetDefaultZoneConfig(cfg)()
+
 	ctx := context.Background()
 	tcArgs := base.TestClusterArgs{ServerArgsPerNode: map[int]base.TestServerArgs{
 		0: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc0"}}}}},
 		1: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc1"}}}}},
 		2: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc2"}}}}},
-		3: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc0"}}}}},
-		4: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc1"}}}}},
-		5: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc2"}}}}},
-		6: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc0"}}}}},
-		7: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc1"}}}}},
-		8: base.TestServerArgs{StoreSpecs: []base.StoreSpec{{InMemory: true, Attributes: roachpb.Attributes{Attrs: []string{"dc2"}}}}},
 	}}
-	tc := testcluster.StartTestCluster(t, 9, tcArgs)
+	tc := testcluster.StartTestCluster(t, 3, tcArgs)
 	defer tc.Stopper().Stop(ctx)
 	sqlDB := sqlutils.MakeSQLRunner(t, tc.Conns[0])
 
@@ -199,7 +197,7 @@ func TestPartitioning(t *testing.T) {
 			if !strings.Contains(traceLine[1], "Scan") || strings.Contains(traceLine[1], "sending batch") {
 				continue
 			}
-			if !strings.HasPrefix(traceLine[0], node) {
+			if !strings.Contains(traceLine[0], node) {
 				scansWrongNode = append(scansWrongNode, strings.Join(traceLine, " "))
 			}
 		}
@@ -224,30 +222,6 @@ func TestPartitioning(t *testing.T) {
 		}
 		if dc2Err != nil {
 			log.Info(ctx, dc2Err)
-		}
-		if dc1Err != nil || dc2Err != nil {
-			var id int
-			var buf []byte
-			rows := sqlDB.Query(`SELECT id, config FROM system.zones`)
-			defer rows.Close()
-			for rows.Next() {
-				if err := rows.Scan(&id, &buf); err != nil {
-					t.Fatalf("%+v", err)
-				}
-				var cfg config.ZoneConfig
-				if err := cfg.Unmarshal(buf); err != nil {
-					t.Fatalf("%+v", err)
-				}
-				log.Infof(ctx, "config %d %v", id, cfg)
-			}
-
-			rangeDescs, err := allRangeDescriptors(ctx, tc.Server(0).KVClient().(*client.DB))
-			if err != nil {
-				t.Fatalf("%+v", err)
-			}
-			for _, rangeDesc := range rangeDescs {
-				log.Infof(ctx, "range %v", rangeDesc)
-			}
 		}
 
 		if dc1Err != nil {

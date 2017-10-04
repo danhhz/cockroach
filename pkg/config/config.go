@@ -193,7 +193,6 @@ func (z ZoneConfig) MaybeGetPartition(keySuffix []byte) (ZoneConfig, bool) {
 		if len(endKey) == 0 {
 			endKey = p.Span.Key.PrefixEnd()
 		}
-		// log.Infof(context.TODO(), "MaybeGetPartition [%s,%s) %s %v %v", p.Span.Key, p.Span.EndKey, roachpb.Key(keySuffix), p.Span.Key.Compare(keySuffix) <= 0, bytes.Compare(keySuffix, endKey) < 0)
 		if p.Span.Key.Compare(keySuffix) <= 0 && bytes.Compare(keySuffix, endKey) < 0 {
 			// TODO(dan): Depending on how we implement subpartitions, this may
 			// need to recurse.
@@ -402,11 +401,7 @@ func (s SystemConfig) GetZoneConfigForKey(key roachpb.RKey) (ZoneConfig, error) 
 		objectID = keys.SystemRangesID
 	}
 
-	cfg, err := s.getZoneConfigForID(objectID, keySuffix)
-	if objectID == 51 {
-		log.Infof(context.TODO(), "GetZoneConfigForKey %v %s -> %v", err, roachpb.Key(append(keys.MakeTablePrefix(objectID), keySuffix...)), cfg.Constraints)
-	}
-	return cfg, err
+	return s.getZoneConfigForID(objectID, keySuffix)
 }
 
 // getZoneConfigForID looks up the zone config for the object (table or database)
@@ -539,23 +534,17 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 					// TODO(dan): BEFORE MERGE what should this do? log and skip?
 					panic(err)
 				}
-				// if !startKey.Less(keys.MakeTablePrefix(51)) {
-				// 	log.Infof(context.TODO(), "partition [%s,%s) -> %#v", startKey, endKey, zone)
-				// }
 				choppedStartKey := startKey[len(tablePrefix):]
 				for _, p := range zone.PartitionSpans {
-					if !startKey.Less(keys.MakeTablePrefix(51)) {
-						// log.Infof(context.TODO(), "partitionspan [%s,%s) -> [%s,%s)", startKey, endKey, p.Span.Key, p.Span.EndKey)
-					}
-
+					// TODO(dan): This logic is super inelegant and under
+					// tested. We should have a test for every combination of
+					// startKey/endKey + partition boundaries.
 					partitionStart := roachpb.RKey(p.Span.Key)
 					if partitionStart.Equal(endKey[len(tablePrefix):]) {
 						return nil
 					}
 					if choppedStartKey.Less(partitionStart) {
-						ret := append(tablePrefix, partitionStart...)
-						// log.Infof(context.TODO(), "\n\n\n\npartitionsplit [%s,%s) -> %s", startKey, endKey, roachpb.Key(ret))
-						return ret
+						return append(tablePrefix, partitionStart...)
 					}
 					partitionEnd := roachpb.RKey(p.Span.EndKey)
 					if partitionEnd.Equal(choppedStartKey) {
@@ -568,9 +557,7 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 						partitionEnd = partitionStart.PrefixEnd()
 					}
 					if !partitionEnd.Less(choppedStartKey) {
-						ret := append(tablePrefix, partitionEnd...)
-						// log.Infof(context.TODO(), "\n\n\n\npartitionsplit [%s,%s) -> %s", startKey, endKey, roachpb.Key(ret))
-						return ret
+						return append(tablePrefix, partitionEnd...)
 					}
 				}
 			}
@@ -601,17 +588,11 @@ func (s SystemConfig) ComputeSplitKey(startKey, endKey roachpb.RKey) roachpb.RKe
 		log.Errorf(context.TODO(), "unable to determine largest object ID from system config: %s", err)
 		return nil
 	}
-	splitKey := findSplitKey(startID, endID)
-	// log.Infof(context.TODO(), "findSplitKey [%s,%s) -> %s", startKey, endKey, splitKey)
-	return splitKey
+	return findSplitKey(startID, endID)
 }
 
 // NeedsSplit returns whether the range [startKey, endKey) needs a split due
 // to zone configs.
 func (s SystemConfig) NeedsSplit(startKey, endKey roachpb.RKey) bool {
-	splitKey := s.ComputeSplitKey(startKey, endKey)
-	if !startKey.Less(keys.MakeTablePrefix(51)) {
-		// log.Infof(context.TODO(), "NeedsSplit [%s,%s) -> %s", startKey, endKey, splitKey)
-	}
-	return len(splitKey) > 0
+	return len(s.ComputeSplitKey(startKey, endKey)) > 0
 }
