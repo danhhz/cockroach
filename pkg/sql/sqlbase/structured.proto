@@ -297,11 +297,13 @@ message IndexDescriptor {
 message PartitioningDescriptor {
   message List {
     optional string name = 1 [(gogoproto.nullable) = false];
-    repeated bytes values = 2 [(gogoproto.casttype) = "EncodedEncDatums"];
+    repeated bytes values = 2;
+    optional PartitioningDescriptor subpartition = 3 [(gogoproto.nullable) = false];
   }
   message Range {
     optional string name = 1 [(gogoproto.nullable) = false];
-    optional bytes values_less_than = 2 [(gogoproto.casttype) = "EncodedEncDatums"];
+    optional bytes values_less_than = 2;
+    optional PartitioningDescriptor subpartition = 3 [(gogoproto.nullable) = false];
   }
 
   optional uint32 num_columns = 1 [(gogoproto.nullable) = false];

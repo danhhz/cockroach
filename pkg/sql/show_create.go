@@ -17,11 +17,13 @@ package sql
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/pkg/errors"
 )
 
 // showCreateView returns a valid SQL representation of the CREATE
@@ -135,7 +137,9 @@ func (p *planner) showCreateTable(
 		return "", err
 	}
 
-	if err := showCreatePartitioning(desc, &desc.PrimaryIndex, &buf); err != nil {
+	if err := showCreatePartitioning(
+		&desc.PrimaryIndex, &desc.PrimaryIndex.Partitioning, &buf, 0, 0,
+	); err != nil {
 		return "", err
 	}
 
@@ -187,29 +191,57 @@ func (p *planner) showCreateInterleave(
 }
 
 func showCreatePartitioning(
-	desc *sqlbase.TableDescriptor, idx *sqlbase.IndexDescriptor, buf *bytes.Buffer,
+	indexDesc *sqlbase.IndexDescriptor,
+	partDesc *sqlbase.PartitioningDescriptor,
+	buf *bytes.Buffer,
+	indent int,
+	colOffset int,
 ) error {
-	if idx.Partitioning.NumColumns == 0 {
+	if partDesc.NumColumns == 0 {
 		return nil
 	}
-	fmt.Fprintf(buf, " PARTITION BY LIST (")
-	for i := 0; i < int(idx.Partitioning.NumColumns); i++ {
+	indentStr := strings.Repeat("\t", indent)
+	buf.WriteString(` PARTITION BY `)
+	if len(partDesc.List) > 0 {
+		buf.WriteString(`LIST`)
+	} else if len(partDesc.Range) > 0 {
+		buf.WriteString(`RANGE`)
+	} else {
+		return errors.Errorf("invalid partition descriptor: %v", partDesc)
+	}
+	buf.WriteString(` (`)
+	for i := 0; i < int(partDesc.NumColumns); i++ {
 		if i != 0 {
 			fmt.Printf(", ")
 		}
-		fmt.Fprintf(buf, idx.ColumnNames[i])
+		fmt.Fprintf(buf, indexDesc.ColumnNames[colOffset+i])
 	}
 	fmt.Fprintf(buf, ") (")
-	for i, part := range idx.Partitioning.List {
+	for i, part := range partDesc.List {
 		if i != 0 {
 			fmt.Printf(", ")
 		}
-		fmt.Fprintf(buf, "PARTITION ")
+		fmt.Fprintf(buf, "\n%s\tPARTITION ", indentStr)
 		fmt.Fprintf(buf, part.Name)
-		fmt.Fprintf(buf, "(")
-		// TODO(dan): Print the values.
-		fmt.Fprintf(buf, ")")
+		fmt.Fprintf(buf, " (VALUES (TODO))")
+		if err := showCreatePartitioning(
+			indexDesc, &part.Subpartition, buf, indent+1, colOffset+int(partDesc.NumColumns)); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(buf, ")")
+	for i, part := range partDesc.Range {
+		if i != 0 {
+			fmt.Printf(", ")
+		}
+		fmt.Fprintf(buf, "\n%s\tPARTITION ", indentStr)
+		fmt.Fprintf(buf, part.Name)
+		fmt.Fprintf(buf, " VALUES LESS THAN (VALUES (TODO))")
+		if err := showCreatePartitioning(
+			indexDesc, &part.Subpartition, buf, indent+1, colOffset+int(partDesc.NumColumns),
+		); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(buf, "\n%s)", indentStr)
 	return nil
 }

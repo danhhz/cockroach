@@ -217,6 +217,8 @@ func TestPartitioning(t *testing.T) {
 			}
 		}
 
+		// TODO(dan): I'd love to avoid this SucceedsSoon, maybe if we SCATTER
+		// first?
 		testutils.SucceedsSoon(t, func() error {
 			dc1Err := verifyScansOnNode(`SELECT * FROM data.list WHERE a = 10`, `n2`)
 			dc2Err := verifyScansOnNode(`SELECT * FROM data.list WHERE a = 20`, `n3`)
@@ -268,6 +270,8 @@ func TestPartitioning(t *testing.T) {
 			}
 		}
 
+		// TODO(dan): I'd love to avoid this SucceedsSoon, maybe if we SCATTER
+		// first?
 		testutils.SucceedsSoon(t, func() error {
 			rs := sqlDB.QueryStr(`SHOW TESTING_RANGES FROM TABLE data.range`)
 			for _, r := range rs {

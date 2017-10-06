@@ -2560,7 +2560,6 @@ opt_interleave_drop_behavior:
     $$.val = DropDefault
   }
 
-// TODO(dan): PARTITION BY RANGE
 opt_partition_by:
   PARTITION BY LIST '(' name_list ')' '(' list_partitions ')'
   {
@@ -2588,16 +2587,20 @@ list_partitions:
   {
     $$.val = []Partition{$1.partition()}
   }
-  | list_partitions ',' list_partition
+| list_partitions ',' list_partition
   {
     $$.val = append($1.partitions(), $3.partition())
   }
 
-
 list_partition:
-  PARTITION name table_ref
+  PARTITION name '(' values_clause ')' opt_partition_by
   {
-    $$.val = Partition{Name: $2, Values: $3.tblExpr(), Typ: PartitionByList}
+    $$.val = Partition{
+      Name: $2,
+      Values: &AliasedTableExpr{Expr: &Subquery{Select: $4.selectStmt()}},
+      Typ: PartitionByList,
+      Subpartition: $6.partitionBy(),
+    }
   }
 
 range_partitions:
@@ -2605,15 +2608,20 @@ range_partitions:
   {
     $$.val = []Partition{$1.partition()}
   }
-  | range_partitions ',' range_partition
+| range_partitions ',' range_partition
   {
     $$.val = append($1.partitions(), $3.partition())
   }
 
 range_partition:
-  PARTITION name VALUES LESS THAN table_ref
+  PARTITION name VALUES LESS THAN '(' values_clause ')' opt_partition_by
   {
-    $$.val = Partition{Name: $2, Values: $6.tblExpr(), Typ: PartitionByRange}
+    $$.val = Partition{
+      Name: $2,
+      Values: &AliasedTableExpr{Expr: &Subquery{Select: $7.selectStmt()}},
+      Typ: PartitionByRange,
+      Subpartition: $9.partitionBy(),
+    }
   }
 
 column_def:

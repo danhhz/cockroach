@@ -4,16 +4,46 @@ statement ok
 CREATE TABLE users (
   id SERIAL, country STRING, email STRING, PRIMARY KEY (country, id)
 ) PARTITION BY LIST (country) (
-  PARTITION north_america VALUES ('US')
+  PARTITION north_america (VALUES ('US'))
 )
 
 query TT
 SHOW CREATE TABLE users
 ----
 users CREATE TABLE users (
-      id INT NOT NULL DEFAULT unique_rowid(),
-      country STRING NOT NULL,
-      email STRING NULL,
-      CONSTRAINT "primary" PRIMARY KEY (country ASC, id ASC),
-      FAMILY "primary" (id, country, email)
-) PARTITION BY LIST (country) ()
+    id INT NOT NULL DEFAULT unique_rowid(),
+    country STRING NOT NULL,
+    email STRING NULL,
+    CONSTRAINT "primary" PRIMARY KEY (country ASC, id ASC),
+    FAMILY "primary" (id, country, email)
+) PARTITION BY LIST (country) (
+    PARTITION north_america (VALUES (TODO))
+)
+
+statement ok
+CREATE TABLE subpartition (
+  a INT, b INT, c INT, PRIMARY KEY (a, b, c)
+) PARTITION BY LIST (a) (
+  PARTITION foo (VALUES (0)) PARTITION BY RANGE (b) (
+    PARTITION bar VALUES LESS THAN (VALUES (1)) PARTITION BY RANGE (c) (
+      PARTITION baz VALUES LESS THAN (VALUES (2))
+    )
+  )
+)
+
+query TT
+SHOW CREATE TABLE subpartition
+----
+subpartition CREATE TABLE subpartition (
+    a INT NOT NULL,
+    b INT NOT NULL,
+    c INT NOT NULL,
+    CONSTRAINT "primary" PRIMARY KEY (a ASC, b ASC, c ASC),
+    FAMILY "primary" (a, b, c)
+) PARTITION BY LIST (a) (
+    PARTITION foo (VALUES (TODO)) PARTITION BY RANGE (b) (
+        PARTITION bar VALUES LESS THAN (VALUES (TODO)) PARTITION BY RANGE (c) (
+            PARTITION baz VALUES LESS THAN (VALUES (TODO))
+        )
+    )
+)

@@ -1120,14 +1120,12 @@ func addPartitionedBy(
 	ctx context.Context,
 	tableDesc *sqlbase.TableDescriptor,
 	indexDesc *sqlbase.IndexDescriptor,
+	partDesc *sqlbase.PartitioningDescriptor,
 	part *parser.PartitionBy,
 	evalCtx *parser.EvalContext,
 ) error {
 	// TODO(dan): Validate part.Fields against the index columns.
-
-	indexDesc.Partitioning = sqlbase.PartitioningDescriptor{
-		NumColumns: uint32(len(part.Fields)),
-	}
+	partDesc.NumColumns = uint32(len(part.Fields))
 
 	colMap := make(map[sqlbase.ColumnID]int)
 	for i := 0; i < len(part.Fields); i++ {
@@ -1135,12 +1133,12 @@ func addPartitionedBy(
 	}
 
 	for _, partition := range part.Partitions {
-		rows, err := evalCtx.Planner.QueryRows(ctx, fmt.Sprintf(`SELECT * FROM %s`, partition.Values))
+		rows, err := evalCtx.Planner.QueryRows(ctx, fmt.Sprintf(`SELECT * FROM (%s)`, partition.Values))
 		if err != nil {
 			return err
 		}
 
-		var values []sqlbase.EncodedEncDatums
+		var values [][]byte
 		var scratch []byte
 		for _, row := range rows {
 			if len(row) != len(part.Fields) {
@@ -1159,35 +1157,51 @@ func addPartitionedBy(
 
 		switch part.Typ {
 		case parser.PartitionByList:
-			indexDesc.Partitioning.List = append(indexDesc.Partitioning.List, sqlbase.PartitioningDescriptor_List{
+			p := sqlbase.PartitioningDescriptor_List{
 				Name:   partition.Name,
 				Values: values,
-			})
+			}
+			if partition.Subpartition != nil {
+				if err := addPartitionedBy(
+					ctx, tableDesc, indexDesc, &p.Subpartition, partition.Subpartition, evalCtx,
+				); err != nil {
+					return err
+				}
+			}
+			partDesc.List = append(partDesc.List, p)
 		case parser.PartitionByRange:
 			// TODO(dan): This check should be in TableDescriptor.Validate
 			if len(values) != 1 {
 				return errors.Errorf("range partitions expect exactly one row got: %v", rows)
 			}
-			indexDesc.Partitioning.Range = append(indexDesc.Partitioning.Range, sqlbase.PartitioningDescriptor_Range{
+			p := sqlbase.PartitioningDescriptor_Range{
 				Name:           partition.Name,
 				ValuesLessThan: values[0],
-			})
+			}
+			if partition.Subpartition != nil {
+				if err := addPartitionedBy(
+					ctx, tableDesc, indexDesc, &p.Subpartition, partition.Subpartition, evalCtx,
+				); err != nil {
+					return err
+				}
+			}
+			partDesc.Range = append(partDesc.Range, p)
 		default:
 			return errors.Errorf("unsupported PARTITION BY: %s", part.Typ)
 		}
 	}
 
 	// TODO(dan): This check should be in TableDescriptor.Validate
-	if len(indexDesc.Partitioning.List) > 0 && len(indexDesc.Partitioning.Range) > 0 {
+	if len(partDesc.List) > 0 && len(partDesc.Range) > 0 {
 		return errors.Errorf("only one of list or range partitioning may be used")
 	}
 
 	// TODO(dan): I think instead we should make the user sort it and fail if
 	// it's not. What does MySQL do?
-	sort.Slice(indexDesc.Partitioning.Range, func(i, j int) bool {
+	sort.Slice(partDesc.Range, func(i, j int) bool {
 		return bytes.Compare(
-			indexDesc.Partitioning.Range[i].ValuesLessThan,
-			indexDesc.Partitioning.Range[j].ValuesLessThan,
+			partDesc.Range[i].ValuesLessThan,
+			partDesc.Range[j].ValuesLessThan,
 		) < 0
 	})
 
@@ -1422,7 +1436,9 @@ func MakeTableDesc(
 	}
 
 	if n.PartitionBy != nil {
-		if err := addPartitionedBy(ctx, &desc, &desc.PrimaryIndex, n.PartitionBy, evalCtx); err != nil {
+		if err := addPartitionedBy(
+			ctx, &desc, &desc.PrimaryIndex, &desc.PrimaryIndex.Partitioning, n.PartitionBy, evalCtx,
+		); err != nil {
 			return desc, err
 		}
 	}

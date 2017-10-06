@@ -673,7 +673,8 @@ type Partition struct {
 	Name   string
 	Values TableExpr
 	// TODO(dan): PartitionByType here is pretty hacky
-	Typ PartitionByType
+	Typ          PartitionByType
+	Subpartition *PartitionBy
 }
 
 // Format implements the NodeFormatter interface.
@@ -684,8 +685,12 @@ func (node Partition) Format(buf *bytes.Buffer, f FmtFlags) {
 	if node.Typ == PartitionByRange {
 		buf.WriteString(` VALUES LESS THAN`)
 	}
-	buf.WriteString(` `)
+	buf.WriteString(` (`)
 	FormatNode(buf, f, node.Values)
+	buf.WriteString(`)`)
+	if node.Subpartition != nil {
+		FormatNode(buf, f, node.Subpartition)
+	}
 }
 
 // CreateTable represents a CREATE TABLE statement.

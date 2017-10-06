@@ -44387,6 +44387,7 @@ export const cockroach = $root.cockroach = (() => {
                      * @type {Object}
                      * @property {string} [name] List name.
                      * @property {Array.<Uint8Array>} [values] List values.
+                     * @property {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} [subpartition] List subpartition.
                      */
 
                     /**
@@ -44416,6 +44417,12 @@ export const cockroach = $root.cockroach = (() => {
                     List.prototype.values = $util.emptyArray;
 
                     /**
+                     * List subpartition.
+                     * @type {(cockroach.sql.sqlbase.PartitioningDescriptor$Properties|null)}
+                     */
+                    List.prototype.subpartition = null;
+
+                    /**
                      * Creates a new List instance using the specified properties.
                      * @param {cockroach.sql.sqlbase.PartitioningDescriptor.List$Properties=} [properties] Properties to set
                      * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.List} List instance
@@ -44438,6 +44445,8 @@ export const cockroach = $root.cockroach = (() => {
                         if (message.values != null && message.values.length)
                             for (let i = 0; i < message.values.length; ++i)
                                 writer.uint32(/* id 2, wireType 2 =*/18).bytes(message.values[i]);
+                        if (message.subpartition != null && message.hasOwnProperty("subpartition"))
+                            $root.cockroach.sql.sqlbase.PartitioningDescriptor.encode(message.subpartition, writer.uint32(/* id 3, wireType 2 =*/26).fork()).ldelim();
                         return writer;
                     };
 
@@ -44473,6 +44482,9 @@ export const cockroach = $root.cockroach = (() => {
                                 if (!(message.values && message.values.length))
                                     message.values = [];
                                 message.values.push(reader.bytes());
+                                break;
+                            case 3:
+                                message.subpartition = $root.cockroach.sql.sqlbase.PartitioningDescriptor.decode(reader, reader.uint32());
                                 break;
                             default:
                                 reader.skipType(tag & 7);
@@ -44513,6 +44525,11 @@ export const cockroach = $root.cockroach = (() => {
                                 if (!(message.values[i] && typeof message.values[i].length === "number" || $util.isString(message.values[i])))
                                     return "values: buffer[] expected";
                         }
+                        if (message.subpartition != null && message.hasOwnProperty("subpartition")) {
+                            let error = $root.cockroach.sql.sqlbase.PartitioningDescriptor.verify(message.subpartition);
+                            if (error)
+                                return "subpartition." + error;
+                        }
                         return null;
                     };
 
@@ -44536,6 +44553,11 @@ export const cockroach = $root.cockroach = (() => {
                                     $util.base64.decode(object.values[i], message.values[i] = $util.newBuffer($util.base64.length(object.values[i])), 0);
                                 else if (object.values[i].length)
                                     message.values[i] = object.values[i];
+                        }
+                        if (object.subpartition != null) {
+                            if (typeof object.subpartition !== "object")
+                                throw TypeError(".cockroach.sql.sqlbase.PartitioningDescriptor.List.subpartition: object expected");
+                            message.subpartition = $root.cockroach.sql.sqlbase.PartitioningDescriptor.fromObject(object.subpartition);
                         }
                         return message;
                     };
@@ -44561,8 +44583,10 @@ export const cockroach = $root.cockroach = (() => {
                         let object = {};
                         if (options.arrays || options.defaults)
                             object.values = [];
-                        if (options.defaults)
+                        if (options.defaults) {
                             object.name = "";
+                            object.subpartition = null;
+                        }
                         if (message.name != null && message.hasOwnProperty("name"))
                             object.name = message.name;
                         if (message.values && message.values.length) {
@@ -44570,6 +44594,8 @@ export const cockroach = $root.cockroach = (() => {
                             for (let j = 0; j < message.values.length; ++j)
                                 object.values[j] = options.bytes === String ? $util.base64.encode(message.values[j], 0, message.values[j].length) : options.bytes === Array ? Array.prototype.slice.call(message.values[j]) : message.values[j];
                         }
+                        if (message.subpartition != null && message.hasOwnProperty("subpartition"))
+                            object.subpartition = $root.cockroach.sql.sqlbase.PartitioningDescriptor.toObject(message.subpartition, options);
                         return object;
                     };
 
@@ -44601,6 +44627,7 @@ export const cockroach = $root.cockroach = (() => {
                      * @type {Object}
                      * @property {string} [name] Range name.
                      * @property {Uint8Array} [values_less_than] Range values_less_than.
+                     * @property {cockroach.sql.sqlbase.PartitioningDescriptor$Properties} [subpartition] Range subpartition.
                      */
 
                     /**
@@ -44629,6 +44656,12 @@ export const cockroach = $root.cockroach = (() => {
                     Range.prototype.values_less_than = $util.newBuffer([]);
 
                     /**
+                     * Range subpartition.
+                     * @type {(cockroach.sql.sqlbase.PartitioningDescriptor$Properties|null)}
+                     */
+                    Range.prototype.subpartition = null;
+
+                    /**
                      * Creates a new Range instance using the specified properties.
                      * @param {cockroach.sql.sqlbase.PartitioningDescriptor.Range$Properties=} [properties] Properties to set
                      * @returns {cockroach.sql.sqlbase.PartitioningDescriptor.Range} Range instance
@@ -44650,6 +44683,8 @@ export const cockroach = $root.cockroach = (() => {
                             writer.uint32(/* id 1, wireType 2 =*/10).string(message.name);
                         if (message.values_less_than != null && message.hasOwnProperty("values_less_than"))
                             writer.uint32(/* id 2, wireType 2 =*/18).bytes(message.values_less_than);
+                        if (message.subpartition != null && message.hasOwnProperty("subpartition"))
+                            $root.cockroach.sql.sqlbase.PartitioningDescriptor.encode(message.subpartition, writer.uint32(/* id 3, wireType 2 =*/26).fork()).ldelim();
                         return writer;
                     };
 
@@ -44683,6 +44718,9 @@ export const cockroach = $root.cockroach = (() => {
                                 break;
                             case 2:
                                 message.values_less_than = reader.bytes();
+                                break;
+                            case 3:
+                                message.subpartition = $root.cockroach.sql.sqlbase.PartitioningDescriptor.decode(reader, reader.uint32());
                                 break;
                             default:
                                 reader.skipType(tag & 7);
@@ -44719,6 +44757,11 @@ export const cockroach = $root.cockroach = (() => {
                         if (message.values_less_than != null && message.hasOwnProperty("values_less_than"))
                             if (!(message.values_less_than && typeof message.values_less_than.length === "number" || $util.isString(message.values_less_than)))
                                 return "values_less_than: buffer expected";
+                        if (message.subpartition != null && message.hasOwnProperty("subpartition")) {
+                            let error = $root.cockroach.sql.sqlbase.PartitioningDescriptor.verify(message.subpartition);
+                            if (error)
+                                return "subpartition." + error;
+                        }
                         return null;
                     };
 
@@ -44738,6 +44781,11 @@ export const cockroach = $root.cockroach = (() => {
                                 $util.base64.decode(object.values_less_than, message.values_less_than = $util.newBuffer($util.base64.length(object.values_less_than)), 0);
                             else if (object.values_less_than.length)
                                 message.values_less_than = object.values_less_than;
+                        if (object.subpartition != null) {
+                            if (typeof object.subpartition !== "object")
+                                throw TypeError(".cockroach.sql.sqlbase.PartitioningDescriptor.Range.subpartition: object expected");
+                            message.subpartition = $root.cockroach.sql.sqlbase.PartitioningDescriptor.fromObject(object.subpartition);
+                        }
                         return message;
                     };
 
@@ -44763,11 +44811,14 @@ export const cockroach = $root.cockroach = (() => {
                         if (options.defaults) {
                             object.name = "";
                             object.values_less_than = options.bytes === String ? "" : [];
+                            object.subpartition = null;
                         }
                         if (message.name != null && message.hasOwnProperty("name"))
                             object.name = message.name;
                         if (message.values_less_than != null && message.hasOwnProperty("values_less_than"))
                             object.values_less_than = options.bytes === String ? $util.base64.encode(message.values_less_than, 0, message.values_less_than.length) : options.bytes === Array ? Array.prototype.slice.call(message.values_less_than) : message.values_less_than;
+                        if (message.subpartition != null && message.hasOwnProperty("subpartition"))
+                            object.subpartition = $root.cockroach.sql.sqlbase.PartitioningDescriptor.toObject(message.subpartition, options);
                         return object;
                     };
 
