@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/net/context"
@@ -1115,6 +1116,100 @@ func (p *planner) finalizeInterleave(
 	return nil
 }
 
+func addPartitionedBy(
+	ctx context.Context,
+	tableDesc *sqlbase.TableDescriptor,
+	indexDesc *sqlbase.IndexDescriptor,
+	partDesc *sqlbase.PartitioningDescriptor,
+	part *parser.PartitionBy,
+	evalCtx *parser.EvalContext,
+) error {
+	// TODO(dan): Validate part.Fields against the index columns.
+	partDesc.NumColumns = uint32(len(part.Fields))
+
+	colMap := make(map[sqlbase.ColumnID]int)
+	for i := 0; i < len(part.Fields); i++ {
+		colMap[indexDesc.ColumnIDs[i]] = i
+	}
+
+	for _, partition := range part.Partitions {
+		rows, err := evalCtx.Planner.QueryRows(ctx,
+			fmt.Sprintf(`SELECT * FROM (%s)`, &parser.ValuesClause{partition.Tuples}),
+		)
+		if err != nil {
+			return err
+		}
+
+		var values [][]byte
+		var scratch []byte
+		for _, row := range rows {
+			if len(row) != len(part.Fields) {
+				return errors.Errorf("got %d expected %d", len(row), len(part.Fields))
+			}
+			var value []byte
+			var err error
+			for i, datum := range row {
+				value, err = sqlbase.EncodeTableValue(value, indexDesc.ColumnIDs[i], datum, scratch)
+				if err != nil {
+					return err
+				}
+			}
+			values = append(values, value)
+		}
+
+		switch part.Typ {
+		case parser.PartitionByList:
+			p := sqlbase.PartitioningDescriptor_List{
+				Name:   partition.Name,
+				Values: values,
+			}
+			if partition.Subpartition != nil {
+				if err := addPartitionedBy(
+					ctx, tableDesc, indexDesc, &p.Subpartition, partition.Subpartition, evalCtx,
+				); err != nil {
+					return err
+				}
+			}
+			partDesc.List = append(partDesc.List, p)
+		case parser.PartitionByRange:
+			// TODO(dan): This check should be in TableDescriptor.Validate
+			if len(values) != 1 {
+				return errors.Errorf("range partitions expect exactly one row got: %v", rows)
+			}
+			p := sqlbase.PartitioningDescriptor_Range{
+				Name:           partition.Name,
+				ValuesLessThan: values[0],
+			}
+			if partition.Subpartition != nil {
+				if err := addPartitionedBy(
+					ctx, tableDesc, indexDesc, &p.Subpartition, partition.Subpartition, evalCtx,
+				); err != nil {
+					return err
+				}
+			}
+			partDesc.Range = append(partDesc.Range, p)
+		default:
+			return errors.Errorf("unsupported PARTITION BY: %s", part.Typ)
+		}
+	}
+
+	// TODO(dan): This check should be in TableDescriptor.Validate
+	if len(partDesc.List) > 0 && len(partDesc.Range) > 0 {
+		return errors.Errorf("only one of list or range partitioning may be used")
+	}
+
+	// TODO(dan): I think instead we should make the user sort it and fail if
+	// it's not. What does MySQL do?
+	sort.Slice(partDesc.Range, func(i, j int) bool {
+		return bytes.Compare(
+			partDesc.Range[i].ValuesLessThan,
+			partDesc.Range[j].ValuesLessThan,
+		) < 0
+	})
+
+	return nil
+}
+
 func initTableDescriptor(
 	id, parentID sqlbase.ID,
 	name string,
@@ -1338,6 +1433,14 @@ func MakeTableDesc(
 
 	if n.Interleave != nil {
 		if err := addInterleave(ctx, txn, vt, &desc, &desc.PrimaryIndex, n.Interleave, sessionDB); err != nil {
+			return desc, err
+		}
+	}
+
+	if n.PartitionBy != nil {
+		if err := addPartitionedBy(
+			ctx, &desc, &desc.PrimaryIndex, &desc.PrimaryIndex.Partitioning, n.PartitionBy, evalCtx,
+		); err != nil {
 			return desc, err
 		}
 	}

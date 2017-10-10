@@ -290,6 +290,25 @@ message IndexDescriptor {
   // InterleavedBy contains a reference to every table/index that is interleaved
   // into this one.
   repeated ForeignKeyReference interleaved_by = 12  [(gogoproto.nullable) = false];
+
+  optional PartitioningDescriptor partitioning = 15 [(gogoproto.nullable) = false];
+}
+
+message PartitioningDescriptor {
+  message List {
+    optional string name = 1 [(gogoproto.nullable) = false];
+    repeated bytes values = 2;
+    optional PartitioningDescriptor subpartition = 3 [(gogoproto.nullable) = false];
+  }
+  message Range {
+    optional string name = 1 [(gogoproto.nullable) = false];
+    optional bytes values_less_than = 2;
+    optional PartitioningDescriptor subpartition = 3 [(gogoproto.nullable) = false];
+  }
+
+  optional uint32 num_columns = 1 [(gogoproto.nullable) = false];
+  repeated List list = 2 [(gogoproto.nullable) = false];
+  repeated Range range = 3 [(gogoproto.nullable) = false];
 }
 
 // A DescriptorMutation represents a column or an index that

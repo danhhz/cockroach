@@ -412,7 +412,7 @@ func runRmZone(cmd *cobra.Command, args []string) error {
 
 // A setZoneCmd command creates a new or updates an existing zone config.
 var setZoneCmd = &cobra.Command{
-	Use:   "set [options] <database[.table]> -f file.yaml",
+	Use:   "set [options] <database[.table]> [--partition=name] -f file.yaml",
 	Short: "create or update zone config for object ID",
 	Long: `
 Create or update the zone config for the specified database or table to the
@@ -504,8 +504,63 @@ func runSetZone(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("error reading zone config: %s", err)
 		}
-		if err := yaml.Unmarshal(conf, &zone); err != nil {
+		var newZone config.ZoneConfig
+		if zoneCtx.zonePartition == "" {
+			newZone = zone
+		} else {
+			if len(path) < 3 {
+				return fmt.Errorf("cannot specify a partition unless a table is specified")
+			}
+
+			// TODO(benesch): fetching every SQL descriptor is needlessly inefficient.
+			descs, err := queryDescriptors(conn)
+			if err != nil {
+				return err
+			}
+			tableDesc := descs[path[2]].GetTable()
+			if tableDesc == nil {
+				return fmt.Errorf("unable to decode table descriptor for %s", tableDesc)
+			}
+			if !tableDesc.PrimaryIndex.HasPartition(zoneCtx.zonePartition) {
+				return fmt.Errorf("table %s has no partition named %s", args[0], zoneCtx.zonePartition)
+			}
+
+			// TODO(benesch): move this logic to partition-time instead of
+			// zone-config-set time.
+			spansByPartition, err := tableDesc.IndexSpansByPartition(&tableDesc.PrimaryIndex)
+			if err != nil {
+				return err
+			}
+			zone.PartitionSpans = make([]config.PartitionSpan, 0, len(spansByPartition))
+			for partition, spans := range spansByPartition {
+				for _, span := range spans {
+					zone.PartitionSpans = append(zone.PartitionSpans, config.PartitionSpan{
+						Span: span, Partition: partition,
+					})
+				}
+			}
+			sort.Slice(zone.PartitionSpans, func(i, j int) bool {
+				return zone.PartitionSpans[i].Span.Key.Compare(zone.PartitionSpans[j].Span.Key) < 0
+			})
+			for partition := range zone.PartitionZones {
+				// TODO(benesch): make this O(n) instead of O(n^2).
+				if !tableDesc.PrimaryIndex.HasPartition(zoneCtx.zonePartition) {
+					delete(zone.PartitionZones, partition)
+				}
+			}
+
+			newZone = zone.PartitionZones[zoneCtx.zonePartition]
+		}
+		if err := yaml.Unmarshal(conf, &newZone); err != nil {
 			return fmt.Errorf("unable to parse zoneConfig file: %s", err)
+		}
+		if zoneCtx.zonePartition == "" {
+			zone = newZone
+		} else {
+			if zone.PartitionZones == nil {
+				zone.PartitionZones = map[string]config.ZoneConfig{}
+			}
+			zone.PartitionZones[zoneCtx.zonePartition] = newZone
 		}
 
 		if err := zone.Validate(); err != nil {

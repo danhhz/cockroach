@@ -1822,6 +1822,10 @@ type EvalPlanner interface {
 	// expected and returns that row.
 	QueryRow(ctx context.Context, sql string, args ...interface{}) (Datums, error)
 
+	// QueryRows executes a SQL query string where multiple result rows are
+	// returned.
+	QueryRows(ctx context.Context, sql string, args ...interface{}) ([]Datums, error)
+
 	// QualifyWithDatabase resolves a possibly unqualified table name into a
 	// normalized table name that is qualified by database.
 	QualifyWithDatabase(ctx context.Context, t *NormalizableTableName) (*TableName, error)

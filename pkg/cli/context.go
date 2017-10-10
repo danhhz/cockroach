@@ -303,6 +303,7 @@ var debugCtx = struct {
 // zoneCtx captures the command-line parameters of the `zone` command.
 var zoneCtx struct {
 	zoneConfig             string
+	zonePartition          string
 	zoneDisableReplication bool
 }
 

@@ -80,6 +80,12 @@ Disable replication in the zone by setting the desired replica count to 1.
 Equivalent to setting 'num_replicas: 1' via -f.`,
 	}
 
+	ZonePartition = FlagInfo{
+		Name: "partition",
+		Description: `
+Apply the zone configuration to the specified partition instead of the whole table.`,
+	}
+
 	Background = FlagInfo{
 		Name: "background",
 		Description: `

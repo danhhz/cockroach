@@ -237,7 +237,7 @@ func (p *planner) query(ctx context.Context, sql string, args ...interface{}) (p
 func (p *planner) QueryRow(
 	ctx context.Context, sql string, args ...interface{},
 ) (parser.Datums, error) {
-	rows, err := p.queryRows(ctx, sql, args...)
+	rows, err := p.QueryRows(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +251,8 @@ func (p *planner) QueryRow(
 	}
 }
 
-// queryRows executes a SQL query string where multiple result rows are returned.
-func (p *planner) queryRows(
+// QueryRows executes a SQL query string where multiple result rows are returned.
+func (p *planner) QueryRows(
 	ctx context.Context, sql string, args ...interface{},
 ) ([]parser.Datums, error) {
 	plan, err := p.query(ctx, sql, args...)

@@ -159,6 +159,10 @@ func TestParse(t *testing.T) {
 		{`CREATE TABLE a (b STRING COLLATE "DE")`},
 		{`CREATE TABLE a (b STRING[] COLLATE "DE")`},
 
+		{`CREATE TABLE a (b SERIAL) PARTITION BY LIST (b) (PARTITION c VALUES (10), PARTITION d VALUES (20))`},
+		{`CREATE TABLE a (b SERIAL) PARTITION BY RANGE (b) (PARTITION c VALUES LESS THAN (10), PARTITION d VALUES LESS THAN (20))`},
+		{`CREATE TABLE a (b SERIAL) PARTITION BY LIST (b) (PARTITION c VALUES (10) PARTITION BY RANGE (b) (PARTITION c VALUES LESS THAN (10)))`},
+
 		{`CREATE VIEW a AS SELECT * FROM b`},
 		{`CREATE VIEW a AS SELECT b.* FROM b LIMIT 5`},
 		{`CREATE VIEW a AS (SELECT c, d FROM b WHERE c > 0 ORDER BY c)`},
@@ -744,7 +748,7 @@ func TestParse(t *testing.T) {
 		}
 		s := stmts.String()
 		if d.sql != s {
-			t.Errorf("expected %s, but found %s", d.sql, s)
+			t.Errorf("expected \n%s\n, but found \n%s", d.sql, s)
 		}
 	}
 }

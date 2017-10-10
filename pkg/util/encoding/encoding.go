@@ -970,9 +970,13 @@ func PrettyPrintValue(b []byte, sep string) string {
 	return buf.String()
 }
 
-// prettyPrintFirstValue returns a string representation of the first decodable
+// PrettyPrintFirstValue returns a string representation of the first decodable
 // value in the provided byte slice, along with the remaining byte slice
 // after decoding.
+func PrettyPrintFirstValue(b []byte) ([]byte, string, error) {
+	return prettyPrintFirstValue(b)
+}
+
 func prettyPrintFirstValue(b []byte) ([]byte, string, error) {
 	var err error
 	switch PeekType(b) {

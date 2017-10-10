@@ -58,6 +58,11 @@ message Constraints {
   repeated Constraint constraints = 6 [(gogoproto.nullable) = false];
 }
 
+message PartitionSpan {
+  optional roachpb.Span span = 1 [(gogoproto.nullable) = false];
+  optional string partition = 2 [(gogoproto.nullable) = false];
+}
+
 // ZoneConfig holds configuration that is needed for a range of KV pairs. This
 // and the conversion methods must stay in sync with ZoneConfigHuman.
 message ZoneConfig {
@@ -74,6 +79,14 @@ message ZoneConfig {
   // order in which the constraints are stored is arbitrary and may change.
   // https://github.com/cockroachdb/cockroach/blob/master/docs/RFCS/expressive_zone_config.md#constraint-system
   optional Constraints constraints = 6 [(gogoproto.nullable) = false, (gogoproto.moretags) = "yaml:\"constraints,flow\""];
+
+  // PartitionSpans maps non-overlapping subsets of this ZoneConfig's span to
+  // Constrants overrides.
+  repeated PartitionSpan partition_spans = 7 [(gogoproto.nullable) = false];
+  // PartitionConstraints are overrides of the Constrants field. Each is applied
+  // to a subset of the span covered by this ZoneConfig as defined by the
+  // PartitionSpans field.
+  map<string, ZoneConfig> partition_zones = 8 [(gogoproto.nullable) = false];
 }
 
 message SystemConfig {

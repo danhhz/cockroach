@@ -287,6 +287,25 @@ func (desc *IndexDescriptor) ColNamesString() string {
 
 var isUnique = map[bool]string{true: "UNIQUE "}
 
+// HasPartition returns whether the index has a partition with the specified
+// name.
+func (desc *IndexDescriptor) HasPartition(name string) bool {
+	if list := desc.Partitioning.List; list != nil {
+		for _, p := range list {
+			if p.Name == name {
+				return true
+			}
+		}
+	} else if ranges := desc.Partitioning.Range; ranges != nil {
+		for _, p := range ranges {
+			if p.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SQLString returns the SQL string describing this index. If non-empty,
 // "ON tableName" is included in the output in the correct place.
 func (desc *IndexDescriptor) SQLString(tableName string) string {
@@ -2076,6 +2095,95 @@ func (desc *TableDescriptor) PrimaryIndexSpan() roachpb.Span {
 func (desc *TableDescriptor) IndexSpan(indexID IndexID) roachpb.Span {
 	prefix := roachpb.Key(MakeIndexKeyPrefix(desc, indexID))
 	return roachpb.Span{Key: prefix, EndKey: prefix.PrefixEnd()}
+}
+
+// IndexSpansByPartition computes the spans that belong to each partition in the
+// specified index.
+func (desc *TableDescriptor) IndexSpansByPartition(
+	index *IndexDescriptor,
+) (map[string][]roachpb.Span, error) {
+	out := map[string][]roachpb.Span{}
+	indexKeyPrefix := MakeIndexKeyPrefix(desc, index.ID)
+	indexKeyPrefix = indexKeyPrefix[1:]
+	return out, desc.indexSpansByPartition(index, &index.Partitioning, 0, indexKeyPrefix, out)
+}
+
+// TODO(dan): the spans returned by this are not non-overlapping, which is flat
+// out wrong. I think we can pass down an OverlapCoveringMerge into the
+// recursion instead of map[string][]roachpb.Span
+func (desc *TableDescriptor) indexSpansByPartition(
+	index *IndexDescriptor,
+	part *PartitioningDescriptor,
+	colOffset int,
+	prefix []byte,
+	out map[string][]roachpb.Span,
+) error {
+	n := int(index.Partitioning.NumColumns) // TODO(benesch): unsafe cast
+	colMap := make(map[ColumnID]int, n)
+	colTypes := make([]parser.Type, n)
+	for i := 0; i < n; i++ {
+		id := index.ColumnIDs[colOffset+i]
+		colMap[id] = i
+		column, err := desc.FindColumnByID(id)
+		if err != nil {
+			return err
+		}
+		colTypes[i] = column.Type.ToDatumType()
+	}
+	var da DatumAlloc
+	if list := index.Partitioning.List; list != nil {
+		datums := make(parser.Datums, n)
+		for _, p := range list {
+			for _, buf := range p.Values {
+				for i := 0; i < n; i++ {
+					var err error
+					datums[i], buf, err = DecodeTableValue(&da, colTypes[i], buf)
+					if err != nil {
+						return err
+					}
+				}
+				key, _, err := EncodePartialIndexKey(desc, index, n, colMap, datums, prefix)
+				if err != nil {
+					return err
+				}
+				out[p.Name] = append(out[p.Name], roachpb.Span{
+					Key: key, EndKey: roachpb.Key(key).PrefixEnd(),
+				})
+				if p.Subpartition.NumColumns > 0 {
+					if err := desc.indexSpansByPartition(index, &p.Subpartition, colOffset+n, key, out); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	} else if ranges := index.Partitioning.Range; ranges != nil {
+		previousKey := prefix
+		datums := make(parser.Datums, n)
+		for _, p := range ranges {
+			buf := p.ValuesLessThan
+			for i := 0; i < n; i++ {
+				var err error
+				datums[i], buf, err = DecodeTableValue(&da, colTypes[i], buf)
+				if err != nil {
+					return err
+				}
+			}
+			key, _, err := EncodePartialIndexKey(desc, index, n, colMap, datums, prefix)
+			if err != nil {
+				return err
+			}
+			out[p.Name] = append(out[p.Name], roachpb.Span{
+				Key: previousKey, EndKey: key,
+			})
+			previousKey = key
+			if p.Subpartition.NumColumns > 0 {
+				if err := desc.indexSpansByPartition(index, &p.Subpartition, colOffset+n, key, out); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // TableSpan returns the Span that corresponds to the entire table.

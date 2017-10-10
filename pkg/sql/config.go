@@ -26,13 +26,23 @@ func init() {
 	config.ZoneConfigHook = GetZoneConfig
 }
 
-// GetZoneConfig returns the zone config for the object with 'id'.
-func GetZoneConfig(cfg config.SystemConfig, id uint32) (config.ZoneConfig, bool, error) {
+// GetZoneConfig returns the zone config for the key starting with 'id' and
+// ending with 'keySuffix'
+func GetZoneConfig(
+	cfg config.SystemConfig, id uint32, keySuffix []byte,
+) (config.ZoneConfig, bool, error) {
 	// Look in the zones table.
 	if zoneVal := cfg.GetValue(sqlbase.MakeZoneKey(sqlbase.ID(id))); zoneVal != nil {
-		// We're done.
 		zone, err := config.MigrateZoneConfig(zoneVal)
-		return zone, true, err
+		if err != nil {
+			return config.ZoneConfig{}, false, err
+		}
+		if zone, ok := zone.MaybeGetPartition(keySuffix); ok {
+			// Either a partition or the table matched. We're done.
+			return zone, true, nil
+		}
+		// This ZoneConfig contains partition ZoneConfigs (none of which
+		// matched) and no table-level ZoneConfig. Fall back to database, etc.
 	}
 
 	// No zone config for this ID. We need to figure out if it's a database
@@ -44,15 +54,17 @@ func GetZoneConfig(cfg config.SystemConfig, id uint32) (config.ZoneConfig, bool,
 			return config.ZoneConfig{}, false, err
 		}
 		if tableDesc := desc.GetTable(); tableDesc != nil {
-			// This is a table descriptor. Lookup its parent database zone config.
-			return GetZoneConfig(cfg, uint32(tableDesc.ParentID))
+			// This is a table descriptor. Lookup its parent database zone
+			// config. Partitioning is currently on a table level, not database,
+			// so don't forward the keySuffix.
+			return GetZoneConfig(cfg, uint32(tableDesc.ParentID), nil)
 		}
 	}
 
 	// Retrieve the default zone config, but only as long as that wasn't the ID
 	// we were trying to retrieve (avoid infinite recursion).
 	if id != keys.RootNamespaceID {
-		return GetZoneConfig(cfg, keys.RootNamespaceID)
+		return GetZoneConfig(cfg, keys.RootNamespaceID, nil)
 	}
 
 	// No descriptor or not a table.
