@@ -1133,7 +1133,9 @@ func addPartitionedBy(
 	}
 
 	for _, partition := range part.Partitions {
-		rows, err := evalCtx.Planner.QueryRows(ctx, fmt.Sprintf(`SELECT * FROM (%s)`, partition.Values))
+		rows, err := evalCtx.Planner.QueryRows(ctx,
+			fmt.Sprintf(`SELECT * FROM (%s)`, &parser.ValuesClause{partition.Tuples}),
+		)
 		if err != nil {
 			return err
 		}

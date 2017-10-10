@@ -4,7 +4,7 @@ statement ok
 CREATE TABLE users (
   id SERIAL, country STRING, email STRING, PRIMARY KEY (country, id)
 ) PARTITION BY LIST (country) (
-  PARTITION north_america (VALUES ('US'))
+  PARTITION north_america VALUES ('US')
 )
 
 query TT
@@ -17,16 +17,16 @@ users CREATE TABLE users (
     CONSTRAINT "primary" PRIMARY KEY (country ASC, id ASC),
     FAMILY "primary" (id, country, email)
 ) PARTITION BY LIST (country) (
-    PARTITION north_america (VALUES (TODO))
+    PARTITION north_america VALUES (TODO)
 )
 
 statement ok
 CREATE TABLE subpartition (
   a INT, b INT, c INT, PRIMARY KEY (a, b, c)
 ) PARTITION BY LIST (a) (
-  PARTITION foo (VALUES (0)) PARTITION BY RANGE (b) (
-    PARTITION bar VALUES LESS THAN (VALUES (1)) PARTITION BY RANGE (c) (
-      PARTITION baz VALUES LESS THAN (VALUES (2))
+  PARTITION foo VALUES (0) PARTITION BY RANGE (b) (
+    PARTITION bar VALUES LESS THAN (1) PARTITION BY RANGE (c) (
+      PARTITION baz VALUES LESS THAN (2)
     )
   )
 )
@@ -41,9 +41,9 @@ subpartition CREATE TABLE subpartition (
     CONSTRAINT "primary" PRIMARY KEY (a ASC, b ASC, c ASC),
     FAMILY "primary" (a, b, c)
 ) PARTITION BY LIST (a) (
-    PARTITION foo (VALUES (TODO)) PARTITION BY RANGE (b) (
-        PARTITION bar VALUES LESS THAN (VALUES (TODO)) PARTITION BY RANGE (c) (
-            PARTITION baz VALUES LESS THAN (VALUES (TODO))
+    PARTITION foo VALUES (TODO) PARTITION BY RANGE (b) (
+        PARTITION bar VALUES LESS THAN (TODO) PARTITION BY RANGE (c) (
+            PARTITION baz VALUES LESS THAN (TODO)
         )
     )
 )

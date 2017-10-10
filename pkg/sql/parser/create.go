@@ -671,7 +671,7 @@ func (node *PartitionBy) Format(buf *bytes.Buffer, f FmtFlags) {
 // Partition TODO(dan)
 type Partition struct {
 	Name   string
-	Values TableExpr
+	Tuples []*Tuple
 	// TODO(dan): PartitionByType here is pretty hacky
 	Typ          PartitionByType
 	Subpartition *PartitionBy
@@ -682,12 +682,17 @@ func (node Partition) Format(buf *bytes.Buffer, f FmtFlags) {
 	buf.WriteString(`PARTITION `)
 	buf.WriteString(node.Name)
 	// TODO(dan): this is pretty hacky
-	if node.Typ == PartitionByRange {
-		buf.WriteString(` VALUES LESS THAN`)
+	if node.Typ == PartitionByList {
+		buf.WriteString(` VALUES `)
+	} else if node.Typ == PartitionByRange {
+		buf.WriteString(` VALUES LESS THAN `)
 	}
-	buf.WriteString(` (`)
-	FormatNode(buf, f, node.Values)
-	buf.WriteString(`)`)
+	for i, n := range node.Tuples {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		FormatNode(buf, f, n)
+	}
 	if node.Subpartition != nil {
 		FormatNode(buf, f, node.Subpartition)
 	}

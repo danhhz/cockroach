@@ -355,6 +355,9 @@ func (u *sqlSymUnion) partitions() []Partition {
 func (u *sqlSymUnion) partition() Partition {
     return u.val.(Partition)
 }
+func (u *sqlSymUnion) tuples() []*Tuple {
+    return u.val.([]*Tuple)
+}
 
 %}
 
@@ -597,6 +600,7 @@ func (u *sqlSymUnion) partition() Partition {
 %type <*Select> select_no_parens
 %type <SelectStatement> select_clause select_with_parens simple_select values_clause table_clause simple_select_clause
 %type <SelectStatement> set_operation
+%type <SelectStatement> partition_by_rows
 
 %type <empty> alter_using
 %type <Expr> alter_column_default
@@ -641,7 +645,7 @@ func (u *sqlSymUnion) partition() Partition {
 %type <TableDefs> opt_table_elem_list table_elem_list
 %type <*InterleaveDef> opt_interleave
 %type <*PartitionBy> opt_partition_by
-%type <Partition> list_partition range_partition
+%type <*PartitionBy> partition_by
 %type <[]Partition> list_partitions range_partitions
 %type <empty> opt_all_clause
 %type <bool> distinct_clause
@@ -2560,7 +2564,7 @@ opt_interleave_drop_behavior:
     $$.val = DropDefault
   }
 
-opt_partition_by:
+partition_by:
   PARTITION BY LIST '(' name_list ')' '(' list_partitions ')'
   {
     $$.val = &PartitionBy{
@@ -2577,51 +2581,78 @@ opt_partition_by:
       Partitions: $8.partitions(),
     }
   }
+
+opt_partition_by:
+  partition_by
 | /* EMPTY */
   {
     $$.val = (*PartitionBy)(nil)
   }
 
 list_partitions:
-  list_partition
+  PARTITION name VALUES partition_by_rows ',' list_partitions
   {
-    $$.val = []Partition{$1.partition()}
-  }
-| list_partitions ',' list_partition
-  {
-    $$.val = append($1.partitions(), $3.partition())
-  }
-
-list_partition:
-  PARTITION name '(' values_clause ')' opt_partition_by
-  {
-    $$.val = Partition{
+    $$.val = append([]Partition{{
       Name: $2,
-      Values: &AliasedTableExpr{Expr: &Subquery{Select: $4.selectStmt()}},
+      Tuples: $4.tuples(),
       Typ: PartitionByList,
-      Subpartition: $6.partitionBy(),
-    }
+    }}, $6.partitions()...)
+  }
+| PARTITION name VALUES partition_by_rows partition_by ',' list_partitions
+  {
+    $$.val = append([]Partition{{
+      Name: $2,
+      Tuples: $4.tuples(),
+      Typ: PartitionByList,
+      Subpartition: $5.partitionBy(),
+    }}, $7.partitions()...)
+  }
+| PARTITION name VALUES partition_by_rows opt_partition_by
+  {
+    $$.val = []Partition{{
+      Name: $2,
+      Tuples: $4.tuples(),
+      Typ: PartitionByList,
+      Subpartition: $5.partitionBy(),
+    }}
   }
 
 range_partitions:
-  range_partition
+  PARTITION name VALUES LESS THAN ctext_row ',' range_partitions
   {
-    $$.val = []Partition{$1.partition()}
+    $$.val = append([]Partition{{
+      Name: $2,
+      Tuples: []*Tuple{{Exprs: $6.exprs()}},
+      Typ: PartitionByRange,
+    }}, $8.partitions()...)
   }
-| range_partitions ',' range_partition
+| PARTITION name VALUES LESS THAN ctext_row partition_by ',' range_partitions
   {
-    $$.val = append($1.partitions(), $3.partition())
+    $$.val = append([]Partition{{
+      Name: $2,
+      Tuples: []*Tuple{{Exprs: $6.exprs()}},
+      Typ: PartitionByRange,
+      Subpartition: $7.partitionBy(),
+    }}, $9.partitions()...)
+  }
+| PARTITION name VALUES LESS THAN ctext_row opt_partition_by
+  {
+    $$.val = []Partition{{
+      Name: $2,
+      Tuples: []*Tuple{{Exprs: $6.exprs()}},
+      Typ: PartitionByRange,
+      Subpartition: $7.partitionBy(),
+    }}
   }
 
-range_partition:
-  PARTITION name VALUES LESS THAN '(' values_clause ')' opt_partition_by
+partition_by_rows:
+  ctext_row
   {
-    $$.val = Partition{
-      Name: $2,
-      Values: &AliasedTableExpr{Expr: &Subquery{Select: $7.selectStmt()}},
-      Typ: PartitionByRange,
-      Subpartition: $9.partitionBy(),
-    }
+    $$.val = []*Tuple{{Exprs: $1.exprs()}}
+  }
+| partition_by_rows ',' ctext_row
+  {
+    $$.val = append($1.tuples(), &Tuple{Exprs: $3.exprs()})
   }
 
 column_def:

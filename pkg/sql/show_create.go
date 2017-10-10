@@ -223,7 +223,7 @@ func showCreatePartitioning(
 		}
 		fmt.Fprintf(buf, "\n%s\tPARTITION ", indentStr)
 		fmt.Fprintf(buf, part.Name)
-		fmt.Fprintf(buf, " (VALUES (TODO))")
+		fmt.Fprintf(buf, " VALUES (TODO)")
 		if err := showCreatePartitioning(
 			indexDesc, &part.Subpartition, buf, indent+1, colOffset+int(partDesc.NumColumns)); err != nil {
 			return err
@@ -235,7 +235,7 @@ func showCreatePartitioning(
 		}
 		fmt.Fprintf(buf, "\n%s\tPARTITION ", indentStr)
 		fmt.Fprintf(buf, part.Name)
-		fmt.Fprintf(buf, " VALUES LESS THAN (VALUES (TODO))")
+		fmt.Fprintf(buf, " VALUES LESS THAN (TODO)")
 		if err := showCreatePartitioning(
 			indexDesc, &part.Subpartition, buf, indent+1, colOffset+int(partDesc.NumColumns),
 		); err != nil {

@@ -193,8 +193,8 @@ func TestPartitioning(t *testing.T) {
 		sqlDB.Exec(`CREATE TABLE data.list (
 			a INT, b INT, PRIMARY KEY (a, b)
 		) PARTITION BY LIST (a) (
-			PARTITION dc1 (VALUES (10)),
-			PARTITION dc2 (VALUES (20))
+			PARTITION dc1 VALUES (10),
+			PARTITION dc2 VALUES (20)
 		)`)
 
 		{
@@ -246,8 +246,8 @@ func TestPartitioning(t *testing.T) {
 		sqlDB.Exec(`CREATE TABLE data.range (
 			a INT, b INT, PRIMARY KEY (a, b)
 		) PARTITION BY RANGE (a) (
-			PARTITION dc1 VALUES LESS THAN (VALUES (4)),
-			PARTITION dc2 VALUES LESS THAN (VALUES (8))
+			PARTITION dc1 VALUES LESS THAN (4),
+			PARTITION dc2 VALUES LESS THAN (8)
 		)`)
 
 		{
