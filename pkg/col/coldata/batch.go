@@ -32,6 +32,7 @@ type Batch interface {
 	ColVec(i int) Vec
 	// ColVecs returns all of the underlying Vecs in this batch.
 	ColVecs() []Vec
+	SetColVecs(b []Vec)
 	// Selection, if not nil, returns the selection vector on this batch: a
 	// densely-packed list of the indices in each column that have not been
 	// filtered out by a previous step.
@@ -117,6 +118,11 @@ func (m *MemBatch) ColVec(i int) Vec {
 // ColVecs implements the Batch interface.
 func (m *MemBatch) ColVecs() []Vec {
 	return m.b
+}
+
+// SetColVecs implements the Batch interface.
+func (m *MemBatch) SetColVecs(b []Vec) {
+	m.b = b
 }
 
 // Selection implements the Batch interface.

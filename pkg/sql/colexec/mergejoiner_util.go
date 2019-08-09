@@ -251,6 +251,10 @@ func (bg *mjBufferedGroup) ColVecs() []coldata.Vec {
 	return bg.colVecs
 }
 
+func (bg *mjBufferedGroup) SetColVecs(_ []coldata.Vec) {
+	panic(`WIP`)
+}
+
 // Selection is not implemented because the tuples should only be appended to
 // mjBufferedGroup, and Append does the deselection step.
 func (bg *mjBufferedGroup) Selection() []uint16 {
