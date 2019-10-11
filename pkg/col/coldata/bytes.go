@@ -92,22 +92,19 @@ func (b *Bytes) Slice(start, end int) *Bytes {
 	if start == 0 && end == len(b.offsets) {
 		return b
 	}
+	bCopy := &Bytes{}
 	if start == end {
-		b.offsets = b.offsets[:0]
-		b.lengths = b.lengths[:0]
-		b.data = b.data[:0]
-		b.maxSetIndex = 0
-		return b
+		return bCopy
 	}
 	translateBy := b.offsets[start]
-	b.data = b.data[b.offsets[start] : b.offsets[end-1]+b.lengths[end-1]]
-	b.offsets = b.offsets[start:end]
-	for i := range b.offsets {
-		b.offsets[i] -= translateBy
+	bCopy.data = b.data[b.offsets[start] : b.offsets[end-1]+b.lengths[end-1]]
+	bCopy.offsets = append([]int32(nil), b.offsets[start:end]...)
+	for i := range bCopy.offsets {
+		bCopy.offsets[i] -= translateBy
 	}
-	b.lengths = b.lengths[start:end]
-	b.maxSetIndex = end - start - 1
-	return b
+	bCopy.lengths = b.lengths[start:end]
+	bCopy.maxSetIndex = end - start - 1
+	return bCopy
 }
 
 // CopySlice copies srcStartIdx inclusive and srcEndIdx exclusive []byte values
