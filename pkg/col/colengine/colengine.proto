@@ -1,0 +1,50 @@
+// Copyright 2019 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
+syntax = "proto3";
+package cockroach.col.colengine;
+option go_package = "colengine";
+
+import "gogoproto/gogo.proto";
+import "util/hlc/timestamp.proto";
+
+// IndexSchema defines the physical schema of how a table's primary or secondary
+// index data is persisted on disk.
+//
+// WIP these column fields are a mess. We probably want to do something like the
+// types package to store this data in the most natural way and then have
+// methods for computing and cacheing []coltypes.T and the idx maps.
+message IndexSchema {
+  option (gogoproto.equal) = true;
+
+  bytes key_prefix = 1;
+  repeated uint32 types = 2 [
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/col/coltypes.T"
+  ];
+  map<uint32, uint32> colidx_by_colid = 3 [
+    (gogoproto.customname) = "ColIdxByColID",
+    (gogoproto.castvalue) = "int"
+  ];
+  repeated uint32 key_colids = 4 [(gogoproto.customname) = "KeyColIDs"];
+  util.hlc.Timestamp min_valid = 5 [(gogoproto.nullable) = false];;
+  util.hlc.Timestamp max_valid = 6 [(gogoproto.nullable) = false];;
+}
+
+// DeterministicData encapsulates everything needed to deterministically ingest
+// columnar data. An independant replay of ingesting a series of
+// DeterministicData will always result in the same Engine state.
+message DeterministicData {
+  option (gogoproto.equal) = true;
+  uint64 namespace = 1 [
+    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/col/coldb.NamespaceID"
+  ];
+  IndexSchema schema = 2 [(gogoproto.nullable) = false];;
+  bytes data = 3;
+}
