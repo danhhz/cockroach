@@ -23,13 +23,17 @@ func init() {
 	RegisterCommand(roachpb.Scan, DefaultDeclareKeys, Scan)
 }
 
+type columnarScanner interface {
+	ColumnarScan(context.Context, roachpb.Span) ([]byte, error)
+}
+
 // Scan scans the key range specified by start key through end key
 // in ascending order up to some maximum number of results. maxKeys
 // stores the number of scan results remaining for this batch
 // (MaxInt64 for no limit).
 func Scan(
 	ctx context.Context, batch engine.ReadWriter, cArgs CommandArgs, resp roachpb.Response,
-) (result.Result, error) {
+) (_ result.Result, retErr error) {
 	args := cArgs.Args.(*roachpb.ScanRequest)
 	h := cArgs.Header
 	reply := resp.(*roachpb.ScanResponse)
@@ -39,6 +43,13 @@ func Scan(
 	var resumeSpan *roachpb.Span
 
 	switch args.ScanFormat {
+	case roachpb.COLUMNAR:
+		buf, err := batch.(columnarScanner).ColumnarScan(ctx, args.Span())
+		if err != nil {
+			return result.Result{}, err
+		}
+		buf = append([]byte(nil), buf...)
+		reply.ColumnarResponses = [][]byte{buf}
 	case roachpb.BATCH_RESPONSE:
 		var kvData []byte
 		var numKvs int64

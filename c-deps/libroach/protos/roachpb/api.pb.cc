@@ -2946,6 +2946,7 @@ bool ScanFormat_IsValid(int value) {
   switch (value) {
     case 0:
     case 1:
+    case 2:
       return true;
     default:
       return false;
@@ -8351,6 +8352,7 @@ const int ScanResponse::kHeaderFieldNumber;
 const int ScanResponse::kRowsFieldNumber;
 const int ScanResponse::kIntentRowsFieldNumber;
 const int ScanResponse::kBatchResponsesFieldNumber;
+const int ScanResponse::kColumnarResponsesFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
 ScanResponse::ScanResponse()
@@ -8365,7 +8367,8 @@ ScanResponse::ScanResponse(const ScanResponse& from)
       _internal_metadata_(NULL),
       rows_(from.rows_),
       intent_rows_(from.intent_rows_),
-      batch_responses_(from.batch_responses_) {
+      batch_responses_(from.batch_responses_),
+      columnar_responses_(from.columnar_responses_) {
   _internal_metadata_.MergeFrom(from._internal_metadata_);
   if (from.has_header()) {
     header_ = new ::cockroach::roachpb::ResponseHeader(*from.header_);
@@ -8406,6 +8409,7 @@ void ScanResponse::Clear() {
   rows_.Clear();
   intent_rows_.Clear();
   batch_responses_.Clear();
+  columnar_responses_.Clear();
   if (GetArenaNoVirtual() == NULL && header_ != NULL) {
     delete header_;
   }
@@ -8474,6 +8478,18 @@ bool ScanResponse::MergePartialFromCodedStream(
         break;
       }
 
+      // repeated bytes columnar_responses = 5;
+      case 5: {
+        if (static_cast< ::google::protobuf::uint8>(tag) ==
+            static_cast< ::google::protobuf::uint8>(42u /* 42 & 0xFF */)) {
+          DO_(::google::protobuf::internal::WireFormatLite::ReadBytes(
+                input, this->add_columnar_responses()));
+        } else {
+          goto handle_unusual;
+        }
+        break;
+      }
+
       default: {
       handle_unusual:
         if (tag == 0) {
@@ -8527,6 +8543,12 @@ void ScanResponse::SerializeWithCachedSizes(
       4, this->batch_responses(i), output);
   }
 
+  // repeated bytes columnar_responses = 5;
+  for (int i = 0, n = this->columnar_responses_size(); i < n; i++) {
+    ::google::protobuf::internal::WireFormatLite::WriteBytes(
+      5, this->columnar_responses(i), output);
+  }
+
   output->WriteRaw((::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()).data(),
                    static_cast<int>((::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()).size()));
   // @@protoc_insertion_point(serialize_end:cockroach.roachpb.ScanResponse)
@@ -8566,6 +8588,14 @@ size_t ScanResponse::ByteSizeLong() const {
       this->batch_responses(i));
   }
 
+  // repeated bytes columnar_responses = 5;
+  total_size += 1 *
+      ::google::protobuf::internal::FromIntSize(this->columnar_responses_size());
+  for (int i = 0, n = this->columnar_responses_size(); i < n; i++) {
+    total_size += ::google::protobuf::internal::WireFormatLite::BytesSize(
+      this->columnar_responses(i));
+  }
+
   if (this->has_header()) {
     total_size += 1 +
       ::google::protobuf::internal::WireFormatLite::MessageSize(
@@ -8592,6 +8622,7 @@ void ScanResponse::MergeFrom(const ScanResponse& from) {
   rows_.MergeFrom(from.rows_);
   intent_rows_.MergeFrom(from.intent_rows_);
   batch_responses_.MergeFrom(from.batch_responses_);
+  columnar_responses_.MergeFrom(from.columnar_responses_);
   if (from.has_header()) {
     mutable_header()->::cockroach::roachpb::ResponseHeader::MergeFrom(from.header());
   }
@@ -8617,6 +8648,7 @@ void ScanResponse::InternalSwap(ScanResponse* other) {
   CastToBase(&rows_)->InternalSwap(CastToBase(&other->rows_));
   CastToBase(&intent_rows_)->InternalSwap(CastToBase(&other->intent_rows_));
   batch_responses_.InternalSwap(CastToBase(&other->batch_responses_));
+  columnar_responses_.InternalSwap(CastToBase(&other->columnar_responses_));
   swap(header_, other->header_);
   _internal_metadata_.Swap(&other->_internal_metadata_);
 }

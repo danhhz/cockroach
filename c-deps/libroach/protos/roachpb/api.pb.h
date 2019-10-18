@@ -578,12 +578,13 @@ const int ReadConsistencyType_ARRAYSIZE = ReadConsistencyType_MAX + 1;
 enum ScanFormat {
   KEY_VALUES = 0,
   BATCH_RESPONSE = 1,
+  COLUMNAR = 2,
   ScanFormat_INT_MIN_SENTINEL_DO_NOT_USE_ = ::google::protobuf::kint32min,
   ScanFormat_INT_MAX_SENTINEL_DO_NOT_USE_ = ::google::protobuf::kint32max
 };
 bool ScanFormat_IsValid(int value);
 const ScanFormat ScanFormat_MIN = KEY_VALUES;
-const ScanFormat ScanFormat_MAX = BATCH_RESPONSE;
+const ScanFormat ScanFormat_MAX = COLUMNAR;
 const int ScanFormat_ARRAYSIZE = ScanFormat_MAX + 1;
 
 enum ChecksumMode {
@@ -3485,6 +3486,28 @@ class ScanResponse : public ::google::protobuf::MessageLite /* @@protoc_insertio
   const ::google::protobuf::RepeatedPtrField< ::std::string>& batch_responses() const;
   ::google::protobuf::RepeatedPtrField< ::std::string>* mutable_batch_responses();
 
+  // repeated bytes columnar_responses = 5;
+  int columnar_responses_size() const;
+  void clear_columnar_responses();
+  static const int kColumnarResponsesFieldNumber = 5;
+  const ::std::string& columnar_responses(int index) const;
+  ::std::string* mutable_columnar_responses(int index);
+  void set_columnar_responses(int index, const ::std::string& value);
+  #if LANG_CXX11
+  void set_columnar_responses(int index, ::std::string&& value);
+  #endif
+  void set_columnar_responses(int index, const char* value);
+  void set_columnar_responses(int index, const void* value, size_t size);
+  ::std::string* add_columnar_responses();
+  void add_columnar_responses(const ::std::string& value);
+  #if LANG_CXX11
+  void add_columnar_responses(::std::string&& value);
+  #endif
+  void add_columnar_responses(const char* value);
+  void add_columnar_responses(const void* value, size_t size);
+  const ::google::protobuf::RepeatedPtrField< ::std::string>& columnar_responses() const;
+  ::google::protobuf::RepeatedPtrField< ::std::string>* mutable_columnar_responses();
+
   bool has_header() const;
   void clear_header();
   static const int kHeaderFieldNumber = 1;
@@ -3503,6 +3526,7 @@ class ScanResponse : public ::google::protobuf::MessageLite /* @@protoc_insertio
   ::google::protobuf::RepeatedPtrField< ::cockroach::roachpb::KeyValue > rows_;
   ::google::protobuf::RepeatedPtrField< ::cockroach::roachpb::KeyValue > intent_rows_;
   ::google::protobuf::RepeatedPtrField< ::std::string> batch_responses_;
+  ::google::protobuf::RepeatedPtrField< ::std::string> columnar_responses_;
   ::cockroach::roachpb::ResponseHeader* header_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_roachpb_2fapi_2eproto::TableStruct;
@@ -18822,6 +18846,75 @@ inline ::google::protobuf::RepeatedPtrField< ::std::string>*
 ScanResponse::mutable_batch_responses() {
   // @@protoc_insertion_point(field_mutable_list:cockroach.roachpb.ScanResponse.batch_responses)
   return &batch_responses_;
+}
+
+// repeated bytes columnar_responses = 5;
+inline int ScanResponse::columnar_responses_size() const {
+  return columnar_responses_.size();
+}
+inline void ScanResponse::clear_columnar_responses() {
+  columnar_responses_.Clear();
+}
+inline const ::std::string& ScanResponse::columnar_responses(int index) const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.ScanResponse.columnar_responses)
+  return columnar_responses_.Get(index);
+}
+inline ::std::string* ScanResponse::mutable_columnar_responses(int index) {
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.ScanResponse.columnar_responses)
+  return columnar_responses_.Mutable(index);
+}
+inline void ScanResponse::set_columnar_responses(int index, const ::std::string& value) {
+  // @@protoc_insertion_point(field_set:cockroach.roachpb.ScanResponse.columnar_responses)
+  columnar_responses_.Mutable(index)->assign(value);
+}
+#if LANG_CXX11
+inline void ScanResponse::set_columnar_responses(int index, ::std::string&& value) {
+  // @@protoc_insertion_point(field_set:cockroach.roachpb.ScanResponse.columnar_responses)
+  columnar_responses_.Mutable(index)->assign(std::move(value));
+}
+#endif
+inline void ScanResponse::set_columnar_responses(int index, const char* value) {
+  GOOGLE_DCHECK(value != NULL);
+  columnar_responses_.Mutable(index)->assign(value);
+  // @@protoc_insertion_point(field_set_char:cockroach.roachpb.ScanResponse.columnar_responses)
+}
+inline void ScanResponse::set_columnar_responses(int index, const void* value, size_t size) {
+  columnar_responses_.Mutable(index)->assign(
+    reinterpret_cast<const char*>(value), size);
+  // @@protoc_insertion_point(field_set_pointer:cockroach.roachpb.ScanResponse.columnar_responses)
+}
+inline ::std::string* ScanResponse::add_columnar_responses() {
+  // @@protoc_insertion_point(field_add_mutable:cockroach.roachpb.ScanResponse.columnar_responses)
+  return columnar_responses_.Add();
+}
+inline void ScanResponse::add_columnar_responses(const ::std::string& value) {
+  columnar_responses_.Add()->assign(value);
+  // @@protoc_insertion_point(field_add:cockroach.roachpb.ScanResponse.columnar_responses)
+}
+#if LANG_CXX11
+inline void ScanResponse::add_columnar_responses(::std::string&& value) {
+  columnar_responses_.Add(std::move(value));
+  // @@protoc_insertion_point(field_add:cockroach.roachpb.ScanResponse.columnar_responses)
+}
+#endif
+inline void ScanResponse::add_columnar_responses(const char* value) {
+  GOOGLE_DCHECK(value != NULL);
+  columnar_responses_.Add()->assign(value);
+  // @@protoc_insertion_point(field_add_char:cockroach.roachpb.ScanResponse.columnar_responses)
+}
+inline void ScanResponse::add_columnar_responses(const void* value, size_t size) {
+  columnar_responses_.Add()->assign(reinterpret_cast<const char*>(value), size);
+  // @@protoc_insertion_point(field_add_pointer:cockroach.roachpb.ScanResponse.columnar_responses)
+}
+inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
+ScanResponse::columnar_responses() const {
+  // @@protoc_insertion_point(field_list:cockroach.roachpb.ScanResponse.columnar_responses)
+  return columnar_responses_;
+}
+inline ::google::protobuf::RepeatedPtrField< ::std::string>*
+ScanResponse::mutable_columnar_responses() {
+  // @@protoc_insertion_point(field_mutable_list:cockroach.roachpb.ScanResponse.columnar_responses)
+  return &columnar_responses_;
 }
 
 // -------------------------------------------------------------------

@@ -367,6 +367,7 @@ enum ScanFormat {
   // The batch_response format: a byte slice of alternating keys and values,
   // each prefixed by their length as a varint.
   BATCH_RESPONSE = 1;
+  COLUMNAR = 2;
 }
 
 
@@ -403,6 +404,7 @@ message ScanResponse {
   // entry. There are num_keys total pairs across all entries, as defined by the
   // ResponseHeader. If set, rows will not be set and vice versa.
   repeated bytes batch_responses = 4;
+  repeated bytes columnar_responses = 5;
 }
 
 // A ReverseScanRequest is the argument to the ReverseScan() method. It specifies the

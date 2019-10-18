@@ -15,6 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -125,7 +126,7 @@ func newColBatchScan(
 	columnIdxMap := spec.Table.ColumnIdxMapWithMutations(returnMutations)
 	fetcher := cFetcher{}
 	if _, _, err := initCRowFetcher(
-		&fetcher, &spec.Table, int(spec.IndexIdx), columnIdxMap, spec.Reverse,
+		&fetcher, flowCtx.EvalCtx.Settings, &spec.Table, int(spec.IndexIdx), columnIdxMap, spec.Reverse,
 		neededColumns, spec.IsCheck, spec.Visibility,
 	); err != nil {
 		return nil, err
@@ -148,6 +149,7 @@ func newColBatchScan(
 // initCRowFetcher initializes a row.cFetcher. See initRowFetcher.
 func initCRowFetcher(
 	fetcher *cFetcher,
+	settings *cluster.Settings,
 	desc *sqlbase.TableDescriptor,
 	indexIdx int,
 	colIdxMap map[sqlbase.ColumnID]int,
@@ -175,7 +177,7 @@ func initCRowFetcher(
 		ValNeededForCol:  valNeededForCol,
 	}
 	if err := fetcher.Init(
-		reverseScan, true /* returnRangeInfo */, isCheck, tableArgs,
+		settings, reverseScan, true /* returnRangeInfo */, isCheck, tableArgs,
 	); err != nil {
 		return nil, false, err
 	}

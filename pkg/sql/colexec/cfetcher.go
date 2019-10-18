@@ -18,10 +18,13 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/colserde"
 	"github.com/cockroachdb/cockroach/pkg/col/coltypes"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/colencoding"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/typeconv"
@@ -228,6 +231,18 @@ type cFetcher struct {
 		colvecs []coldata.Vec
 	}
 
+	colmachine struct {
+		settings     *cluster.Settings
+		d            *colserde.FileDeserializer
+		s            *colserde.FileSerializer
+		idx          int
+		batch        coldata.Batch
+		txn          *client.Txn
+		spans        []roachpb.Span
+		boundsBuf    bytes.Buffer
+		columnarBufs [][]byte
+	}
+
 	// estimatedStaticMemoryUsage is the best guess about how much memory the
 	// cFetcher will use.
 	estimatedStaticMemoryUsage int
@@ -237,8 +252,7 @@ type cFetcher struct {
 // non-primary index, tables.ValNeededForCol can only refer to columns in the
 // index.
 func (rf *cFetcher) Init(
-	reverse,
-	returnRangeInfo bool, isCheck bool, tables ...row.FetcherTableArgs,
+	settings *cluster.Settings, reverse, returnRangeInfo, isCheck bool, tables ...row.FetcherTableArgs,
 ) error {
 	if len(tables) == 0 {
 		return errors.AssertionFailedf("no tables to fetch from")
@@ -288,8 +302,7 @@ func (rf *cFetcher) Init(
 	}
 	rf.machine.batch = coldata.NewMemBatch(typs)
 	rf.machine.colvecs = rf.machine.batch.ColVecs()
-	rf.estimatedStaticMemoryUsage = EstimateBatchSizeBytes(typs, int(coldata.BatchSize()))
-
+	rf.colmachine.settings = settings
 	var err error
 
 	var neededCols util.FastIntSet
@@ -457,6 +470,9 @@ func (rf *cFetcher) StartScan(
 	rf.fetcher = f
 	rf.machine.lastRowPrefix = nil
 	rf.machine.state[0] = stateInitFetch
+	rf.colmachine.txn = txn
+	rf.colmachine.spans = append([]roachpb.Span(nil), spans...)
+	rf.colmachine.d = nil // WIP does this leak it?
 	return nil
 }
 
@@ -544,6 +560,11 @@ const (
 // Turn this on to enable super verbose logging of the fetcher state machine.
 const debugState = false
 
+var columnarScanEnabled = settings.RegisterBoolSetting(
+	"sql.columnar_scan.enabled",
+	"use columnar scans for vectorized execution",
+	false)
+
 // NextBatch processes keys until we complete one batch of rows,
 // coldata.BatchSize() in length, which are returned in columnar format as an
 // exec.Batch. The batch contains one Vec per table column, regardless of the
@@ -551,6 +572,75 @@ const debugState = false
 // Batch should not be modified and is only valid until the next call.
 // When there are no more rows, the Batch.Length is 0.
 func (rf *cFetcher) NextBatch(ctx context.Context) (coldata.Batch, error) {
+	// WIP The prototype only supports the primary index on user tables.
+	columnarScanEligible := rf.table.desc.ID >= keys.MinUserDescID &&
+		rf.table.index.ID == rf.table.desc.PrimaryIndex.ID
+	if columnarScanEligible && columnarScanEnabled.Get(&rf.colmachine.settings.SV) {
+		return rf.nextBatchColumnar(ctx)
+	}
+	return rf.nextBatchKVs(ctx)
+}
+
+func (rf *cFetcher) nextBatchColumnar(ctx context.Context) (coldata.Batch, error) {
+	// log.Infof(ctx, "nextBatchColumnar %v", rf.table.typs)
+	if rf.colmachine.batch == nil {
+		rf.colmachine.batch = coldata.NewMemBatch(rf.table.typs)
+	}
+	for {
+		if rf.colmachine.d != nil && rf.colmachine.idx < rf.colmachine.d.NumBatches() {
+			// WIP reuse rf.colmachine.batch. something is leaking through reset
+			rf.colmachine.batch = coldata.NewMemBatchWithSize(nil, 0)
+			err := rf.colmachine.d.GetBatch(rf.colmachine.idx, rf.colmachine.batch)
+			rf.colmachine.idx++
+			if err != nil {
+				return nil, err
+			}
+			return rf.colmachine.batch, nil
+		}
+
+		if rf.colmachine.d != nil {
+			if err := rf.colmachine.d.Close(); err != nil {
+				return nil, err
+			}
+			rf.colmachine.d = nil
+		}
+		rf.colmachine.idx = 0
+
+		if len(rf.colmachine.columnarBufs) > 0 {
+			var columnarBuf []byte
+			columnarBuf, rf.colmachine.columnarBufs = rf.colmachine.columnarBufs[0], rf.colmachine.columnarBufs[1:]
+			log.Infof(ctx, "got scan response with %d bytes", len(columnarBuf))
+			var err error
+			if rf.colmachine.d, err = colserde.NewFileDeserializerFromBytes(columnarBuf); err != nil {
+				log.Infof(context.TODO(), "%x", columnarBuf)
+				return nil, err
+			}
+			log.Infof(ctx, "got scan response with %d batches", rf.colmachine.d.NumBatches())
+			continue
+		}
+
+		if len(rf.colmachine.spans) == 0 {
+			// All done.
+			rf.colmachine.batch.SetLength(0)
+			return rf.colmachine.batch, nil
+		}
+		span := rf.colmachine.spans[0]
+		// log.Infof(ctx, "nextBatchColumnar %v", span)
+		rf.colmachine.spans = rf.colmachine.spans[1:]
+		req := &roachpb.ScanRequest{
+			RequestHeader: roachpb.RequestHeaderFromSpan(span),
+			ScanFormat:    roachpb.COLUMNAR,
+		}
+		log.Infof(ctx, "WIP sending request %v", req.Span())
+		res, pErr := client.SendWrapped(ctx, rf.colmachine.txn, req)
+		if pErr != nil {
+			return nil, pErr.GoError()
+		}
+		rf.colmachine.columnarBufs = res.(*roachpb.ScanResponse).ColumnarResponses
+	}
+}
+
+func (rf *cFetcher) nextBatchKVs(ctx context.Context) (coldata.Batch, error) {
 	for {
 		if debugState {
 			log.Infof(ctx, "State %s", rf.machine.state[0])

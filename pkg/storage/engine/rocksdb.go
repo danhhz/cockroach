@@ -1135,6 +1135,13 @@ func (r *rocksDBReadOnly) NewIterator(opts IterOptions) Iterator {
 	return iter
 }
 
+func (r *rocksDBReadOnly) ColumnarScan(ctx context.Context, span roachpb.Span) ([]byte, error) {
+	if r.parent.col == nil {
+		return nil, errors.New(`this engine wasn't bootstrapped with a companion columnar engine`)
+	}
+	return r.parent.col.Scan(ctx, span)
+}
+
 // Writer methods are not implemented for rocksDBReadOnly. Ideally, the code could be refactored so that
 // a Reader could be supplied to evaluateBatch
 
