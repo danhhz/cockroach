@@ -30,6 +30,8 @@ import (
 
 	"github.com/cockroachdb/cmux"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/col/colconv"
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -193,7 +195,8 @@ type Server struct {
 	internalMemMetrics  sql.MemoryMetrics
 	adminMemMetrics     sql.MemoryMetrics
 	// sqlMemMetrics are used to track memory usage of sql sessions.
-	sqlMemMetrics sql.MemoryMetrics
+	sqlMemMetrics  sql.MemoryMetrics
+	schemaProvider colengine.SchemaProvider
 }
 
 // NewServer creates a Server from a server.Config.
@@ -430,6 +433,24 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	s.tsServer = ts.MakeServer(s.cfg.AmbientCtx, s.tsDB, nodeCountFn, s.cfg.TimeSeriesServerConfig, s.stopper)
 
+	// Set up Lease Manager
+	var lmKnobs sql.LeaseManagerTestingKnobs
+	if leaseManagerTestingKnobs := cfg.TestingKnobs.SQLLeaseManager; leaseManagerTestingKnobs != nil {
+		lmKnobs = *leaseManagerTestingKnobs.(*sql.LeaseManagerTestingKnobs)
+	}
+	s.leaseMgr = sql.NewLeaseManager(
+		s.cfg.AmbientCtx,
+		&s.nodeIDContainer,
+		s.db,
+		s.clock,
+		nil, /* internalExecutor - will be set later because of circular dependencies */
+		st,
+		lmKnobs,
+		s.stopper,
+		s.cfg.LeaseManagerConfig,
+	)
+	s.schemaProvider = colconv.MakeSchemaProvider(s.leaseMgr)
+
 	// The InternalExecutor will be further initialized later, as we create more
 	// of the server's components. There's a circular dependency - many things
 	// need an InternalExecutor, but the InternalExecutor needs an ExecutorConfig,
@@ -527,23 +548,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 
 	distSQLMetrics := execinfra.MakeDistSQLMetrics(cfg.HistogramWindowInterval())
 	s.registry.AddMetricStruct(distSQLMetrics)
-
-	// Set up Lease Manager
-	var lmKnobs sql.LeaseManagerTestingKnobs
-	if leaseManagerTestingKnobs := cfg.TestingKnobs.SQLLeaseManager; leaseManagerTestingKnobs != nil {
-		lmKnobs = *leaseManagerTestingKnobs.(*sql.LeaseManagerTestingKnobs)
-	}
-	s.leaseMgr = sql.NewLeaseManager(
-		s.cfg.AmbientCtx,
-		&s.nodeIDContainer,
-		s.db,
-		s.clock,
-		nil, /* internalExecutor - will be set later because of circular dependencies */
-		st,
-		lmKnobs,
-		s.stopper,
-		s.cfg.LeaseManagerConfig,
-	)
 
 	// Set up the DistSQL server.
 	distSQLCfg := execinfra.ServerConfig{
@@ -1264,7 +1268,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.mux.Handle("/health", gwMux)
 
-	s.engines, err = s.cfg.CreateEngines(ctx)
+	s.engines, err = s.cfg.CreateEngines(ctx, s.schemaProvider)
 	if err != nil {
 		return errors.Wrap(err, "failed to create engines")
 	}

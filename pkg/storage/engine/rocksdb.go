@@ -26,6 +26,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -520,6 +521,10 @@ type RocksDB struct {
 	// auxDir is used for storing auxiliary files. Ideally it is a subdirectory of Dir.
 	auxDir string
 
+	// TODO(dan): This should replace RocksDB on relevant replicas, not be a field
+	// on RocksDB.
+	col colengine.Engine
+
 	commit struct {
 		syncutil.Mutex
 		cond       sync.Cond
@@ -778,6 +783,35 @@ func (r *RocksDB) Close() {
 	r.syncer.closed = true
 	r.syncer.cond.Signal()
 	r.syncer.Unlock()
+}
+
+// BootstrapColumnar implements the Engine interface.
+func (r *RocksDB) BootstrapColumnar(schema colengine.SchemaProvider) error {
+	if r.col != nil {
+		return errors.New(`already bootstraped with columnar sidecar`)
+	}
+	var colDir string
+	if r.cfg.Dir == `` {
+		var err error
+		if colDir, err = ioutil.TempDir(os.TempDir(), "col"); err != nil {
+			return err
+		}
+	} else {
+		colDir = filepath.Join(r.cfg.Dir, "col")
+		if err := os.Mkdir(colDir, 0755); err != nil {
+			return err
+		}
+	}
+	var err error
+	if r.col, err = colengine.Open(colDir, schema); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Columnar implements the Engine interface.
+func (r *RocksDB) Columnar() colengine.Engine {
+	return r.col
 }
 
 // CreateCheckpoint creates a RocksDB checkpoint in the given directory (which

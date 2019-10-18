@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -416,7 +417,9 @@ func (e *Engines) Close() {
 }
 
 // CreateEngines creates Engines based on the specs in cfg.Stores.
-func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
+func (cfg *Config) CreateEngines(
+	ctx context.Context, schemaProvider colengine.SchemaProvider,
+) (Engines, error) {
 	engines := Engines(nil)
 	defer engines.Close()
 
@@ -463,7 +466,11 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			}
 			details = append(details, fmt.Sprintf("store %d: in-memory, size %s",
 				i, humanizeutil.IBytes(sizeInBytes)))
-			engines = append(engines, engine.NewInMem(spec.Attributes, sizeInBytes))
+			eng := engine.NewInMem(spec.Attributes, sizeInBytes)
+			if err := eng.BootstrapColumnar(schemaProvider); err != nil {
+				return nil, err
+			}
+			engines = append(engines, eng)
 		} else {
 			if spec.Size.Percent > 0 {
 				fileSystemUsage := gosigar.FileSystemUsage{}
@@ -494,6 +501,9 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			eng, err := engine.NewRocksDB(rocksDBConfig, cache)
 			if err != nil {
 				return Engines{}, err
+			}
+			if err := eng.BootstrapColumnar(schemaProvider); err != nil {
+				return nil, err
 			}
 			engines = append(engines, eng)
 		}

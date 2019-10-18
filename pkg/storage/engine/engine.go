@@ -13,6 +13,7 @@ package engine
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -356,6 +357,10 @@ type Engine interface {
 	// which must not exist. The directory should be on the same file system so
 	// that hard links can be used.
 	CreateCheckpoint(dir string) error
+	// BootstrapColumnar adds a columnar companion engine.
+	BootstrapColumnar(colengine.SchemaProvider) error
+	// Columnar returns the columnar companion engine.
+	Columnar() colengine.Engine
 }
 
 // WithSSTables extends the Engine interface with a method to get info
