@@ -60,11 +60,13 @@ func filterTableState(tableDesc *sqlbase.TableDescriptor) error {
 	case sqlbase.TableDescriptor_DROP:
 		return inactiveTableError{errors.New("table is being dropped")}
 	case sqlbase.TableDescriptor_OFFLINE:
-		err := errors.Errorf("table %q is offline", tableDesc.Name)
-		if tableDesc.OfflineReason != "" {
-			err = errors.Errorf("table %q is offline: %s", tableDesc.Name, tableDesc.OfflineReason)
-		}
-		return inactiveTableError{err}
+		// WIP
+		// err := errors.Errorf("table %q is offline", tableDesc.Name)
+		// if tableDesc.OfflineReason != "" {
+		// 	err = errors.Errorf("table %q is offline: %s", tableDesc.Name, tableDesc.OfflineReason)
+		// }
+		// return inactiveTableError{err}
+		return nil
 	case sqlbase.TableDescriptor_ADD:
 		return errTableAdding
 	case sqlbase.TableDescriptor_PUBLIC:

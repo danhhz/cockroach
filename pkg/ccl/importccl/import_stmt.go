@@ -865,7 +865,12 @@ func (r *importResumer) prepareTableDescsForIngestion(
 // Resume is part of the jobs.Resumer interface.
 func (r *importResumer) Resume(
 	ctx context.Context, phs interface{}, resultsCh chan<- tree.Datums,
-) error {
+) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			log.Infof(ctx, `WIP IMPORT failed: %+v`, retErr)
+		}
+	}()
 	details := r.job.Details().(jobspb.ImportDetails)
 	p := phs.(sql.PlanHookState)
 
