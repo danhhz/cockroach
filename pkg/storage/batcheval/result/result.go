@@ -280,6 +280,13 @@ func (p *Result) MergeAndDestroy(q Result) error {
 	}
 	q.Replicated.AddSSTable = nil
 
+	if p.Replicated.ColumnarData == nil {
+		p.Replicated.ColumnarData = q.Replicated.ColumnarData
+	} else if q.Replicated.ColumnarData != nil {
+		return errors.New("conflicting ColumnarData")
+	}
+	q.Replicated.ColumnarData = nil
+
 	if q.Replicated.SuggestedCompactions != nil {
 		if p.Replicated.SuggestedCompactions == nil {
 			p.Replicated.SuggestedCompactions = q.Replicated.SuggestedCompactions

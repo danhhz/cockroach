@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -92,4 +93,5 @@ type EvalContext interface {
 	GetGCThreshold() hlc.Timestamp
 	GetLastReplicaGCTimestamp(context.Context) (hlc.Timestamp, error)
 	GetLease() (roachpb.Lease, roachpb.Lease)
+	GetSchemaProvider() colengine.SchemaProvider
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -121,6 +122,9 @@ func (m *mockEvalCtx) GetLastReplicaGCTimestamp(context.Context) (hlc.Timestamp,
 }
 func (m *mockEvalCtx) GetLease() (roachpb.Lease, roachpb.Lease) {
 	return m.lease, roachpb.Lease{}
+}
+func (m *mockEvalCtx) GetSchemaProvider() colengine.SchemaProvider {
+	panic("unimplemented")
 }
 
 func TestDeclareKeysResolveIntent(t *testing.T) {

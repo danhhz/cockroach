@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -1778,6 +1779,11 @@ func (r *Replica) GetLeaseHistory() []roachpb.Lease {
 	}
 
 	return r.leaseHistory.get()
+}
+
+// GetSchemaProvider WIP
+func (r *Replica) GetSchemaProvider() colengine.SchemaProvider {
+	return r.store.cfg.SchemaProvider
 }
 
 // EnableLeaseHistory turns on the lease history for testing purposes. Returns

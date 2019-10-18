@@ -13,6 +13,9 @@ package batcheval
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colconv"
+	"github.com/cockroachdb/cockroach/pkg/col/coldb"
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/batcheval/result"
@@ -33,7 +36,12 @@ func init() {
 // EvalAddSSTable evaluates an AddSSTable command.
 func EvalAddSSTable(
 	ctx context.Context, batch engine.ReadWriter, cArgs CommandArgs, _ roachpb.Response,
-) (result.Result, error) {
+) (_ result.Result, retErr error) {
+	defer func() {
+		if retErr != nil {
+			log.Infof(ctx, "WIP EvalAddSSTable failed %+v", retErr)
+		}
+	}()
 	args := cArgs.Args.(*roachpb.AddSSTableRequest)
 	h := cArgs.Header
 	ms := cArgs.Stats
@@ -174,11 +182,25 @@ func EvalAddSSTable(
 	stats.ContainsEstimates = !args.DisallowShadowing
 	ms.Add(stats)
 
+	log.Infof(ctx, "AddSSTable %s", args.Span())
+	columnarNamespace := uint64(0) // WIP use the namespace on the read side too
+	schemaer := cArgs.EvalCtx.GetSchemaProvider()
+	columnarData, schema, err := colconv.SSTableToColumnar(
+		ctx, schemaer, args.Span(), args.Data)
+	if err != nil {
+		return result.Result{}, err
+	}
+
 	return result.Result{
 		Replicated: storagepb.ReplicatedEvalResult{
 			AddSSTable: &storagepb.ReplicatedEvalResult_AddSSTable{
 				Data:  args.Data,
 				CRC32: util.CRC32(args.Data),
+			},
+			ColumnarData: &colengine.DeterministicData{
+				Namespace: coldb.NamespaceID(columnarNamespace),
+				Schema:    *schema,
+				Data:      columnarData,
 			},
 		},
 	}, nil

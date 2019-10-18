@@ -13,6 +13,7 @@ package storage
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -195,4 +196,9 @@ func (rec SpanSetReplicaEvalContext) GetLease() (roachpb.Lease, roachpb.Lease) {
 // GetLimiters returns the per-store limiters.
 func (rec *SpanSetReplicaEvalContext) GetLimiters() *batcheval.Limiters {
 	return rec.i.GetLimiters()
+}
+
+// GetSchemaProvider WIP
+func (rec *SpanSetReplicaEvalContext) GetSchemaProvider() colengine.SchemaProvider {
+	return rec.i.GetSchemaProvider()
 }

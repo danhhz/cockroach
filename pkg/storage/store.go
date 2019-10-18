@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -694,6 +695,9 @@ type StoreConfig struct {
 	// gossiped store capacity values which need be exceeded before the store will
 	// gossip immediately without waiting for the periodic gossip interval.
 	GossipWhenCapacityDeltaExceedsFraction float64
+
+	// SchemaProvider WIP
+	SchemaProvider colengine.SchemaProvider
 }
 
 // ConsistencyTestingKnobs is a BatchEvalTestingKnobs struct used to control the

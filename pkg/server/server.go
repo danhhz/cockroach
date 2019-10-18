@@ -507,6 +507,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		}),
 
 		EnableEpochRangeLeases: true,
+		SchemaProvider:         s.schemaProvider,
 	}
 	if storeTestingKnobs := s.cfg.TestingKnobs.Store; storeTestingKnobs != nil {
 		storeCfg.TestingKnobs = *storeTestingKnobs.(*storage.StoreTestingKnobs)

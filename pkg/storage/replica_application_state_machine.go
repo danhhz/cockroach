@@ -1103,6 +1103,11 @@ func (sm *replicaStateMachine) handleNonTrivialReplicatedEvalResult(
 		rResult.ComputeChecksum = nil
 	}
 
+	if rResult.ColumnarData != nil {
+		sm.r.handleColumnarDataResult(ctx, rResult.ColumnarData)
+		rResult.ColumnarData = nil
+	}
+
 	if !rResult.Equal(storagepb.ReplicatedEvalResult{}) {
 		log.Fatalf(ctx, "unhandled field in ReplicatedEvalResult: %s", pretty.Diff(rResult, storagepb.ReplicatedEvalResult{}))
 	}

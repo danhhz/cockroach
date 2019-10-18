@@ -13,6 +13,7 @@ package storage
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/col/colengine"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
@@ -286,6 +287,13 @@ func (r *Replica) handleUsingAppliedStateKeyResult(ctx context.Context) {
 
 func (r *Replica) handleComputeChecksumResult(ctx context.Context, cc *storagepb.ComputeChecksum) {
 	r.computeChecksumPostApply(ctx, *cc)
+}
+
+func (r *Replica) handleColumnarDataResult(ctx context.Context, d *colengine.DeterministicData) {
+	coldb := r.store.engine.Columnar()
+	if err := colengine.IngestAll(ctx, coldb, d.Namespace, &d.Schema, d.Data); err != nil {
+		log.Fatalf(ctx, "ingesting columnar data %+v", err)
+	}
 }
 
 func (r *Replica) handleChangeReplicasResult(
