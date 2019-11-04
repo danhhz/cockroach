@@ -530,6 +530,14 @@
   version = "v1.0.8"
 
 [[projects]]
+  branch = "master"
+  digest = "1:d9e4ea0bff02231bb0a05d70c0a1592b8ff95da8cbb97233a17ce87a9f654146"
+  name = "github.com/danhhz/zeropb"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "09cb98ec0a658190e7d42b8c951c23fcbb1c8e99"
+
+[[projects]]
   digest = "1:ffe9824d294da03b391f44e1ae8281281b4afc1bdaa9588c9097785e3af10cec"
   name = "github.com/davecgh/go-spew"
   packages = ["spew"]
@@ -2026,6 +2034,7 @@
     "github.com/cockroachdb/stress",
     "github.com/cockroachdb/ttycolor",
     "github.com/codahale/hdrhistogram",
+    "github.com/danhhz/zeropb",
     "github.com/docker/distribution/reference",
     "github.com/docker/docker/api/types",
     "github.com/docker/docker/api/types/container",

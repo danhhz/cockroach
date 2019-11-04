@@ -15,6 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginezeropb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 	"github.com/gogo/protobuf/proto"
@@ -172,7 +173,7 @@ type MVCCValueMerger struct {
 	oldToNew      bool
 
 	// Used to avoid heap allocations when passing pointer to `Unmarshal()`.
-	meta enginepb.MVCCMetadata
+	meta enginezeropb.MVCCMetadata
 }
 
 const (
@@ -198,26 +199,27 @@ func (t *MVCCValueMerger) ensureOrder(oldToNew bool) {
 }
 
 func (t *MVCCValueMerger) deserializeMVCCValueAndAppend(value []byte) error {
-	if err := protoutil.Unmarshal(value, &t.meta); err != nil {
+	if err := t.meta.Decode(value); err != nil {
 		return errors.Errorf("corrupted operand value: %v", err)
 	}
-	if len(t.meta.RawBytes) < mvccHeaderSize {
+	metaRawBytes := t.meta.RawBytes()
+	if len(metaRawBytes) < mvccHeaderSize {
 		return errors.Errorf("operand value too short")
 	}
-	if t.meta.RawBytes[mvccTagPos] == byte(roachpb.ValueType_TIMESERIES) {
+	if metaRawBytes[mvccTagPos] == byte(roachpb.ValueType_TIMESERIES) {
 		if t.rawByteOps != nil {
 			return errors.Errorf("inconsistent value types for timeseries merge")
 		}
 		t.timeSeriesOps = append(t.timeSeriesOps, roachpb.InternalTimeSeriesData{})
 		ts := &t.timeSeriesOps[len(t.timeSeriesOps)-1]
-		if err := protoutil.Unmarshal(t.meta.RawBytes[mvccHeaderSize:], ts); err != nil {
+		if err := protoutil.Unmarshal(metaRawBytes[mvccHeaderSize:], ts); err != nil {
 			return errors.Errorf("corrupted timeseries: %v", err)
 		}
 	} else {
 		if t.timeSeriesOps != nil {
 			return errors.Errorf("inconsistent value types for non-timeseries merge")
 		}
-		t.rawByteOps = append(t.rawByteOps, t.meta.RawBytes[mvccHeaderSize:])
+		t.rawByteOps = append(t.rawByteOps, metaRawBytes[mvccHeaderSize:])
 	}
 	return nil
 }
